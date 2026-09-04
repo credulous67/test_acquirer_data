@@ -550,9 +550,9 @@ def write_merchant_reference(ref_dir, merchants, terminals):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="data", help="output base directory")
-    ap.add_argument("--merchants", type=int, default=25)
-    ap.add_argument("--cards", type=int, default=400)
-    ap.add_argument("--authorizations", type=int, default=800)
+    ap.add_argument("--merchants", type=int, default=250)
+    ap.add_argument("--cards", type=int, default=20000)
+    ap.add_argument("--authorizations", type=int, default=200000)
     ap.add_argument("--days-back", type=int, default=30)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()

@@ -25,7 +25,7 @@ or the equivalent products from other vendors.
 
 ```
 python3 scripts/generate_data.py --out data \
-    --merchants 25 --cards 400 --authorizations 800 --days-back 30 --seed 42
+    --merchants 250 --cards 20000 --authorizations 200000 --days-back 30 --seed 42
 ```
 
 The script is deterministic for a given `--seed`. Increase
@@ -78,13 +78,16 @@ scoped by directory.
 
 | Entity | Count |
 |---|---|
-| Merchants | 25 |
-| Terminals | 57 |
-| Cards | 400 |
-| Authorizations | 800 |
+| Merchants | 250 |
+| Terminals | ~640 |
+| Cards | 20,000 |
+| Authorizations | 200,000 (spanning the last 30 days) |
 
-Card network mix (of 400 cards): VISA 107, MASTERCARD 99, AMEX 70,
-JCB 48, DISCOVER 41, DINERS 35.
+At this scale the generated `data/` directory is ~1.3 GB, mostly from
+the 200,000 individual per-transaction JSON files under
+`structured/json/authorizations/`. Generation takes roughly a minute.
+Pass smaller `--merchants`/`--cards`/`--authorizations` values for a
+quicker, lighter-weight dataset.
 
 ## Field dictionary (cards / authorizations)
 
