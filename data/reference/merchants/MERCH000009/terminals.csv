@@ -1,0 +1,3 @@
+terminal_id,merchant_id,terminal_type,serial_number,location
+TERM000026,MERCH000009,POS_CONTACTLESS,SN2274350418,Fairview
+TERM000027,MERCH000009,POS_CHIP_PIN,SN3328710672,Fairview

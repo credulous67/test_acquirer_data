@@ -1,0 +1,3 @@
+terminal_id,merchant_id,terminal_type,serial_number,location
+TERM000055,MERCH000024,ECOM_GATEWAY,SN6360837474,Clinton
+TERM000056,MERCH000024,POS_CONTACTLESS,SN5759234471,Clinton

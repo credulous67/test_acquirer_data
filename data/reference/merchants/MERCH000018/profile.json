@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000018",
+  "legal_name": "Sunset Boulevard Salon",
+  "mcc": "5411",
+  "mcc_description": "Grocery Stores, Supermarkets",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "SOLE_PROPRIETOR",
+  "onboarded_date": "2023-11-30",
+  "address": {
+    "line1": "8807 Elm Ave",
+    "city": "Fairview",
+    "country": "US",
+    "postal_code": "48469"
+  }
+}

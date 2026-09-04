@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000024",
+  "legal_name": "Emerald City Toys",
+  "mcc": "5422",
+  "mcc_description": "Freezer/Meat/Fish Markets",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "PARTNERSHIP",
+  "onboarded_date": "2023-07-17",
+  "address": {
+    "line1": "2715 Elm Ave",
+    "city": "Clinton",
+    "country": "DE",
+    "postal_code": "65461"
+  }
+}

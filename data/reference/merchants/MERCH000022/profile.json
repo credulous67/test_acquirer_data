@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000022",
+  "legal_name": "Bayside Seafood Market",
+  "mcc": "5411",
+  "mcc_description": "Grocery Stores, Supermarkets",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "SOLE_PROPRIETOR",
+  "onboarded_date": "2023-01-07",
+  "address": {
+    "line1": "5048 Market St",
+    "city": "Springfield",
+    "country": "GB",
+    "postal_code": "84364"
+  }
+}

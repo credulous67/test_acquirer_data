@@ -1,0 +1,3 @@
+terminal_id,merchant_id,terminal_type,serial_number,location
+TERM000006,MERCH000003,ECOM_GATEWAY,SN8168204967,Georgetown
+TERM000007,MERCH000003,POS_CONTACTLESS,SN3315992115,Georgetown

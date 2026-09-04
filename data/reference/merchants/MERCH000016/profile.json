@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000016",
+  "legal_name": "QuickStop Convenience",
+  "mcc": "5431",
+  "mcc_description": "Farm/Roadside Produce Stands",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "SOLE_PROPRIETOR",
+  "onboarded_date": "2024-05-31",
+  "address": {
+    "line1": "1806 Market St",
+    "city": "Riverside",
+    "country": "AU",
+    "postal_code": "88172"
+  }
+}

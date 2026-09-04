@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000011",
+  "legal_name": "Cedar Park Cinema",
+  "mcc": "5541",
+  "mcc_description": "Service Stations (Fuel)",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "PARTNERSHIP",
+  "onboarded_date": "2023-01-24",
+  "address": {
+    "line1": "4432 Harbor Rd",
+    "city": "Riverside",
+    "country": "CA",
+    "postal_code": "17331"
+  }
+}

@@ -1,0 +1,26 @@
+merchant_id,legal_name,mcc,mcc_description,acquirer_id,business_type,onboarded_date,address_line1,address_city,address_country,address_postal
+MERCH000001,Riverside Grocers,5992,Florists,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2022-01-26,4516 Market St,Riverside,GB,23434
+MERCH000002,Northgate Electronics,5422,Freezer/Meat/Fish Markets,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2023-08-28,6922 Main St,Springfield,US,38657
+MERCH000003,Blue Anchor Diner,5511,Car and Truck Dealers,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2023-07-29,3267 Harbor Rd,Georgetown,GB,68878
+MERCH000004,Summit Hardware,5941,Sporting Goods Stores,ACQ-TESTPOC-001,CORPORATION,2024-04-08,116 Market St,Georgetown,CA,46421
+MERCH000005,Cobalt Fashion Outlet,5651,Family Clothing Stores,ACQ-TESTPOC-001,LLC,2024-02-21,5524 Main St,Springfield,AU,22676
+MERCH000006,Pacific Coast Fuel,7011,"Hotels, Motels, Resorts",ACQ-TESTPOC-001,CORPORATION,2023-09-11,4343 Main St,Georgetown,DE,26361
+MERCH000007,Lantern Books & Coffee,5462,Bakeries,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2023-07-20,4813 Harbor Rd,Fairview,DE,35203
+MERCH000008,Ironbridge Motors,5533,Auto Parts and Accessories,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2022-02-16,3743 Elm Ave,Springfield,GB,23238
+MERCH000009,Willow Creek Pharmacy,5462,Bakeries,ACQ-TESTPOC-001,CORPORATION,2023-04-10,5987 Market St,Fairview,CA,37460
+MERCH000010,Metro Transit Kiosk,5422,Freezer/Meat/Fish Markets,ACQ-TESTPOC-001,CORPORATION,2023-12-20,1179 Harbor Rd,Riverside,DE,42087
+MERCH000011,Cedar Park Cinema,5541,Service Stations (Fuel),ACQ-TESTPOC-001,PARTNERSHIP,2023-01-24,4432 Harbor Rd,Riverside,CA,17331
+MERCH000012,Harbor View Hotel,5511,Car and Truck Dealers,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2024-04-04,5178 Industrial Way,Fairview,US,37653
+MERCH000013,Golden Wheat Bakery,5941,Sporting Goods Stores,ACQ-TESTPOC-001,CORPORATION,2022-08-06,8189 Industrial Way,Georgetown,GB,44718
+MERCH000014,Silverline Telecom,5651,Family Clothing Stores,ACQ-TESTPOC-001,LLC,2024-02-02,9207 Harbor Rd,Fairview,DE,66155
+MERCH000015,Maple & Vine Wine Bar,5941,Sporting Goods Stores,ACQ-TESTPOC-001,PARTNERSHIP,2023-01-06,3603 Market St,Clinton,AU,21915
+MERCH000016,QuickStop Convenience,5431,Farm/Roadside Produce Stands,ACQ-TESTPOC-001,SOLE_PROPRIETOR,2024-05-31,1806 Market St,Riverside,AU,88172
+MERCH000017,Aurora Home Furnishings,5812,"Eating Places, Restaurants",ACQ-TESTPOC-001,PARTNERSHIP,2023-01-26,9773 Industrial Way,Clinton,CA,82512
+MERCH000018,Sunset Boulevard Salon,5411,"Grocery Stores, Supermarkets",ACQ-TESTPOC-001,SOLE_PROPRIETOR,2023-11-30,8807 Elm Ave,Fairview,US,48469
+MERCH000019,Foothills Sporting Goods,4814,Telecommunication Services,ACQ-TESTPOC-001,LLC,2023-04-10,63 Elm Ave,Clinton,GB,76542
+MERCH000020,Crestwood Pet Supply,5251,Hardware Stores,ACQ-TESTPOC-001,CORPORATION,2024-05-11,8327 Harbor Rd,Riverside,GB,59009
+MERCH000021,Union Square Florist,5431,Farm/Roadside Produce Stands,ACQ-TESTPOC-001,LLC,2023-07-07,8699 Main St,Clinton,CA,74042
+MERCH000022,Bayside Seafood Market,5411,"Grocery Stores, Supermarkets",ACQ-TESTPOC-001,SOLE_PROPRIETOR,2023-01-07,5048 Market St,Springfield,GB,84364
+MERCH000023,Redwood Auto Parts,5812,"Eating Places, Restaurants",ACQ-TESTPOC-001,SOLE_PROPRIETOR,2024-01-20,7972 Main St,Clinton,GB,26828
+MERCH000024,Emerald City Toys,5422,Freezer/Meat/Fish Markets,ACQ-TESTPOC-001,PARTNERSHIP,2023-07-17,2715 Elm Ave,Clinton,DE,65461
+MERCH000025,Prairie Wind Farm Stand,5942,Book Stores,ACQ-TESTPOC-001,LLC,2024-01-01,5117 Industrial Way,Fairview,AU,77839

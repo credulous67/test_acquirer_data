@@ -1,0 +1,3 @@
+terminal_id,merchant_id,terminal_type,serial_number,location
+TERM000048,MERCH000020,ECOM_GATEWAY,SN8325785916,Riverside
+TERM000049,MERCH000020,POS_CHIP_PIN,SN1480494664,Riverside

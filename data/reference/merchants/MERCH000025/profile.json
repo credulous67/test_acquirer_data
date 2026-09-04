@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000025",
+  "legal_name": "Prairie Wind Farm Stand",
+  "mcc": "5942",
+  "mcc_description": "Book Stores",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "LLC",
+  "onboarded_date": "2024-01-01",
+  "address": {
+    "line1": "5117 Industrial Way",
+    "city": "Fairview",
+    "country": "AU",
+    "postal_code": "77839"
+  }
+}

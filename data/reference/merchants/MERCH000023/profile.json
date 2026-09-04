@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000023",
+  "legal_name": "Redwood Auto Parts",
+  "mcc": "5812",
+  "mcc_description": "Eating Places, Restaurants",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "SOLE_PROPRIETOR",
+  "onboarded_date": "2024-01-20",
+  "address": {
+    "line1": "7972 Main St",
+    "city": "Clinton",
+    "country": "GB",
+    "postal_code": "26828"
+  }
+}

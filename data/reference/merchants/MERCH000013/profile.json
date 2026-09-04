@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000013",
+  "legal_name": "Golden Wheat Bakery",
+  "mcc": "5941",
+  "mcc_description": "Sporting Goods Stores",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "CORPORATION",
+  "onboarded_date": "2022-08-06",
+  "address": {
+    "line1": "8189 Industrial Way",
+    "city": "Georgetown",
+    "country": "GB",
+    "postal_code": "44718"
+  }
+}

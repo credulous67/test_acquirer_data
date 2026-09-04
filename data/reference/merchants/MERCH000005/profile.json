@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000005",
+  "legal_name": "Cobalt Fashion Outlet",
+  "mcc": "5651",
+  "mcc_description": "Family Clothing Stores",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "LLC",
+  "onboarded_date": "2024-02-21",
+  "address": {
+    "line1": "5524 Main St",
+    "city": "Springfield",
+    "country": "AU",
+    "postal_code": "22676"
+  }
+}

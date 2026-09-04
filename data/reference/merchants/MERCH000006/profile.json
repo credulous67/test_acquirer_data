@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000006",
+  "legal_name": "Pacific Coast Fuel",
+  "mcc": "7011",
+  "mcc_description": "Hotels, Motels, Resorts",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "CORPORATION",
+  "onboarded_date": "2023-09-11",
+  "address": {
+    "line1": "4343 Main St",
+    "city": "Georgetown",
+    "country": "DE",
+    "postal_code": "26361"
+  }
+}

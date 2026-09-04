@@ -1,0 +1,15 @@
+{
+  "merchant_id": "MERCH000021",
+  "legal_name": "Union Square Florist",
+  "mcc": "5431",
+  "mcc_description": "Farm/Roadside Produce Stands",
+  "acquirer_id": "ACQ-TESTPOC-001",
+  "business_type": "LLC",
+  "onboarded_date": "2023-07-07",
+  "address": {
+    "line1": "8699 Main St",
+    "city": "Clinton",
+    "country": "CA",
+    "postal_code": "74042"
+  }
+}
