@@ -12,7 +12,7 @@ or the equivalent products from other vendors.
   publish for sandbox use — e.g. `4242 42..`, `4111 11..`, `5555 55..`,
   `3782 82..`) with randomised trailing digits and a correctly computed
   Luhn check digit. They are structurally valid 16/15/14-digit numbers
-  but **do not correspond to any real, issued account**. All 400
+  but **do not correspond to any real, issued account**. All 20,000
   generated PANs were Luhn-validated after generation (see below).
 - Cardholder names, CVVs, expiry dates, track2 data, merchants and
   addresses are randomly generated and do not reference real people,
@@ -44,18 +44,20 @@ data/
 │       ├── merchants.csv
 │       ├── terminals.csv
 │       ├── cards.csv                   card vault: pan, cvv, track2, cardholder_name, expiry
-│       └── authorizations.csv          800 auth records, denormalized with card data included
+│       └── authorizations.csv          200,000 auth records — only pan, expiry_date and
+│                                        card_network carried over from the card; no
+│                                        cardholder_name/cvv/track2/card_id (see below)
 │
 ├── structured/                         Form 2: same data as structured files
 │   ├── json/
 │   │   ├── authorizations/<merchant_id>/<yyyy-mm-dd>/<txn_id>.json
-│   │   │                               800 individual files across ~25 merchant dirs x
-│   │   │                               ~30 date dirs — useful for exercising CTE-style
+│   │   │                               200,000 individual files across ~250 merchant dirs
+│   │   │                               x ~30 date dirs — useful for exercising CTE-style
 │   │   │                               per-directory / per-file transparent encryption
 │   │   │                               policies rather than one large blob
-│   │   └── authorizations_all.json     same 800 records as one JSON array
+│   │   └── authorizations_all.json     same 200,000 records as one JSON array
 │   └── xml/
-│       └── authorizations.xml          same 800 records as ISO8583-flavoured XML
+│       └── authorizations.xml          same 200,000 records as ISO8583-flavoured XML
 │
 └── reference/                          Form 3: generic payment reference data
     ├── mcc_codes.csv                   25 common merchant category codes
@@ -89,27 +91,33 @@ the 200,000 individual per-transaction JSON files under
 Pass smaller `--merchants`/`--cards`/`--authorizations` values for a
 quicker, lighter-weight dataset.
 
-## Field dictionary (cards / authorizations)
+## Field dictionary
 
-| Field | Notes |
-|---|---|
-| `pan` | Full synthetic PAN, Luhn-valid, from a test BIN prefix |
-| `pan_masked` | First 6 + last 4, middle masked — for comparing masked vs. unmasked encryption targets |
-| `cvv` | 3 digits (4 for Amex) — normally out-of-scope for storage; included here only because this is synthetic test data for encryption tooling |
-| `track2` | `PAN=YYMMservice_codediscretionary` |
-| `cardholder_name` | Fake name |
-| `expiry_date` | `MM/YY`, always after the transaction date |
-| `response_code` / `response_text` / `response_status` | ISO8583-style field 39 equivalents, ~70% approval rate |
-| `avs_result` / `cvv_result` | Single-letter verification result codes |
+`cardholder_name`, `cvv`, `track2` and the `card_id` surrogate key live
+**only** on the `cards` table — they're not part of what a merchant's
+terminal receives back in an ISO 8583 authorization message, so they
+aren't denormalized onto `authorizations`. Join `authorizations.pan`
+to `cards.pan` if you need to look one up from a transaction.
+
+| Field | Table(s) | Notes |
+|---|---|---|
+| `pan` | cards, authorizations | Full synthetic PAN, Luhn-valid, from a test BIN prefix |
+| `cvv` | cards only | 3 digits (4 for Amex) — normally out-of-scope for storage post-auth even by an issuer; kept only on the card vault for encryption-tooling coverage |
+| `track2` | cards only | `PAN=YYMMservice_codediscretionary` |
+| `cardholder_name` | cards only | Fake name — not carried in an authorization message |
+| `card_id` | cards only | Internal surrogate key; no ISO 8583 equivalent |
+| `expiry_date` | cards, authorizations | `MM/YY`, always after the transaction date |
+| `response_code` / `response_text` / `response_status` | authorizations | ISO8583-style field 39 equivalents, ~70% approval rate |
+| `avs_result` / `cvv_result` | authorizations | Single-letter verification *result* codes returned in the auth response (not the CVV value itself) |
 
 Full column list and types: see `data/db/schema.sql`.
 
 ## Suggested test uses
 
 - **CADP-style app-level encryption**: encrypt/tokenize `pan`, `cvv`,
-  `track2`, `cardholder_name` columns in `cards.csv` / `authorizations.csv`
-  or in the SQLite DB; verify format-preserving/tokenized values still
-  join correctly across `cards` ↔ `authorizations`.
+  `track2`, `cardholder_name` in `cards.csv` (or the SQLite `cards`
+  table) and `pan` in `authorizations`; verify format-preserving/
+  tokenized PAN values still join correctly between the two tables.
 - **CDP-style gateway tokenization**: replay `authorizations_all.json`
   or the per-file JSON records as simulated API payloads through a
   tokenization proxy; check masked/tokenized output.

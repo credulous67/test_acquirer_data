@@ -182,10 +182,6 @@ def generate_pan(prefix: str, length: int) -> str:
     return partial + luhn_check_digit(partial)
 
 
-def mask_pan(pan: str) -> str:
-    return pan[:6] + "*" * (len(pan) - 10) + pan[-4:]
-
-
 def random_name():
     return f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
 
@@ -268,7 +264,6 @@ def generate_cards(n):
         cards.append({
             "card_id": gen_id("CARD", i + 1, 6),
             "pan": pan,
-            "pan_masked": mask_pan(pan),
             "cardholder_name": random_name(),
             "expiry_date": expiry,
             "cvv": random_cvv(cvv_len),
@@ -305,13 +300,8 @@ def generate_authorizations(n, merchants, terminals, cards, days_back=30):
             "transaction_id": str(uuid.uuid4()),
             "merchant_id": merchant["merchant_id"],
             "terminal_id": terminal["terminal_id"],
-            "card_id": card["card_id"],
             "pan": card["pan"],
-            "pan_masked": card["pan_masked"],
-            "cardholder_name": card["cardholder_name"],
             "expiry_date": card["expiry_date"],
-            "cvv": card["cvv"],
-            "track2": card["track2"],
             "card_network": card["card_network"],
             "transaction_type": random.choice(TXN_TYPES),
             "amount": f"{amount_major:.2f}",
@@ -353,6 +343,11 @@ def write_schema_sql(path):
 -- Synthetic merchant-acquiring schema for encryption POC testing.
 -- pan / cvv / track2 / cardholder_name are the columns intended to be
 -- protected by CADP / CTE / CDP (or vendor-equivalent) controls.
+-- cardholder_name, cvv and track2 live only on the cards table (the
+-- card vault), not on authorizations: they are not part of the data a
+-- merchant would see in an ISO 8583 authorization message/response,
+-- so they are looked up via cards.pan when needed rather than
+-- denormalized onto every transaction.
 
 CREATE TABLE IF NOT EXISTS merchants (
     merchant_id     TEXT PRIMARY KEY,
@@ -379,7 +374,6 @@ CREATE TABLE IF NOT EXISTS terminals (
 CREATE TABLE IF NOT EXISTS cards (
     card_id         TEXT PRIMARY KEY,
     pan             TEXT NOT NULL,        -- sensitive: PAN
-    pan_masked      TEXT NOT NULL,
     cardholder_name TEXT NOT NULL,        -- sensitive
     expiry_date     TEXT NOT NULL,        -- sensitive
     cvv             TEXT NOT NULL,        -- sensitive, out of scope for storage in real systems (test-only)
@@ -393,13 +387,8 @@ CREATE TABLE IF NOT EXISTS authorizations (
     transaction_id              TEXT PRIMARY KEY,
     merchant_id                 TEXT NOT NULL REFERENCES merchants(merchant_id),
     terminal_id                 TEXT NOT NULL REFERENCES terminals(terminal_id),
-    card_id                     TEXT NOT NULL REFERENCES cards(card_id),
     pan                         TEXT NOT NULL,   -- sensitive (denormalized for encryption-at-rest testing)
-    pan_masked                  TEXT NOT NULL,
-    cardholder_name             TEXT NOT NULL,   -- sensitive
     expiry_date                 TEXT NOT NULL,   -- sensitive
-    cvv                         TEXT NOT NULL,   -- sensitive
-    track2                      TEXT NOT NULL,   -- sensitive
     card_network                TEXT NOT NULL,
     transaction_type            TEXT NOT NULL,
     amount                      TEXT NOT NULL,
@@ -420,7 +409,7 @@ CREATE TABLE IF NOT EXISTS authorizations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_auth_merchant ON authorizations(merchant_id);
-CREATE INDEX IF NOT EXISTS idx_auth_card ON authorizations(card_id);
+CREATE INDEX IF NOT EXISTS idx_auth_pan ON authorizations(pan);
 CREATE INDEX IF NOT EXISTS idx_auth_timestamp ON authorizations(timestamp);
 """
     with open(path, "w") as f:
@@ -447,14 +436,14 @@ def write_sqlite_db(path, schema_sql, merchants, terminals, cards, auths):
         [(t["terminal_id"], t["merchant_id"], t["terminal_type"], t["serial_number"], t["location"]) for t in terminals],
     )
     cur.executemany(
-        "INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?)",
-        [(c["card_id"], c["pan"], c["pan_masked"], c["cardholder_name"], c["expiry_date"], c["cvv"],
+        "INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?)",
+        [(c["card_id"], c["pan"], c["cardholder_name"], c["expiry_date"], c["cvv"],
           c["track2"], c["card_network"], c["issuing_bin"], c["created_at"]) for c in cards],
     )
     cur.executemany(
-        "INSERT INTO authorizations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [(a["transaction_id"], a["merchant_id"], a["terminal_id"], a["card_id"], a["pan"], a["pan_masked"],
-          a["cardholder_name"], a["expiry_date"], a["cvv"], a["track2"], a["card_network"], a["transaction_type"],
+        "INSERT INTO authorizations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(a["transaction_id"], a["merchant_id"], a["terminal_id"], a["pan"],
+          a["expiry_date"], a["card_network"], a["transaction_type"],
           a["amount"], a["currency_code_numeric"], a["currency_code_alpha"], a["mcc"], a["pos_entry_mode"],
           a["auth_code"], a["response_code"], a["response_text"], a["response_status"], a["stan"],
           a["retrieval_reference_number"], a["avs_result"], a["cvv_result"], a["acquirer_id"], a["timestamp"])
@@ -577,11 +566,11 @@ def main():
     write_csv(os.path.join(out, "db", "csv", "terminals.csv"), terminals,
               ["terminal_id", "merchant_id", "terminal_type", "serial_number", "location"])
     write_csv(os.path.join(out, "db", "csv", "cards.csv"), cards,
-              ["card_id", "pan", "pan_masked", "cardholder_name", "expiry_date", "cvv", "track2",
+              ["card_id", "pan", "cardholder_name", "expiry_date", "cvv", "track2",
                "card_network", "issuing_bin", "created_at"])
     write_csv(os.path.join(out, "db", "csv", "authorizations.csv"), auths,
-              ["transaction_id", "merchant_id", "terminal_id", "card_id", "pan", "pan_masked",
-               "cardholder_name", "expiry_date", "cvv", "track2", "card_network", "transaction_type",
+              ["transaction_id", "merchant_id", "terminal_id", "pan",
+               "expiry_date", "card_network", "transaction_type",
                "amount", "currency_code_numeric", "currency_code_alpha", "mcc", "pos_entry_mode",
                "auth_code", "response_code", "response_text", "response_status", "stan",
                "retrieval_reference_number", "avs_result", "cvv_result", "acquirer_id", "timestamp"])
