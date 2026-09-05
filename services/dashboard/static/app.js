@@ -215,7 +215,7 @@ function addFeedRow(event) {
     <td>${event.auth_type ?? ""}</td>
     <td>${event.currency ?? ""} ${((event.amount ?? 0) / 100).toFixed(2)}</td>
     <td class="${approved ? "approved" : "declined"}">${event.response_status ?? ""}</td>
-    <td>${event.response_code ?? ""}</td>
+    <td>${event.response_code ?? ""}${event.response_desc && event.response_code !== "00" ? ` (${event.response_desc})` : ""}</td>
     <td>${duration}</td>
   `;
   feedBody.prepend(row);

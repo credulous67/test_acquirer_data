@@ -63,31 +63,26 @@ class RateBody(BaseModel):
 
 def current_stats():
     now = time.time()
-    window = 5.0
+    # At low traffic a short window can hold a literal handful of
+    # transactions, so a rate/ratio computed over it swings wildly between
+    # one broadcast tick and the next -- illegible noise, not a signal.
+    # 20s keeps every live figure (TPS, approve/decline split, auth-type
+    # split) an average over enough transactions to read as a smooth trend.
+    window = 20.0
     recent = [t for t in COMPLETED_TIMESTAMPS if now - t <= window]
     tps = len(recent) / window
     window_approved = len([t for t in APPROVED_TIMESTAMPS if now - t <= window])
     window_declined = len([t for t in DECLINED_TIMESTAMPS if now - t <= window])
     tps_approved = window_approved / window
     tps_declined = window_declined / window
-
-    # The two stacked-to-100% charts (approve/decline split, auth-type
-    # split) use a much wider window than the TPS figures above: at low
-    # traffic a 5s window can hold a literal handful of transactions, so
-    # its ratio swings from 0% to 100% between one broadcast tick and the
-    # next -- illegible noise, not a signal. Widening to 20s means each
-    # sample is an average over ~4x as many transactions.
-    pct_window = 20.0
-    pct_window_approved = len([t for t in APPROVED_TIMESTAMPS if now - t <= pct_window])
-    pct_window_declined = len([t for t in DECLINED_TIMESTAMPS if now - t <= pct_window])
-    pct_window_total = pct_window_approved + pct_window_declined
+    window_total = window_approved + window_declined
     # deliberately not the same as approve_pct/decline_pct below, which are
     # lifetime cumulative and would look like a flat, barely-moving line
-    window_approve_pct = (pct_window_approved / pct_window_total * 100) if pct_window_total else 0.0
-    window_decline_pct = (pct_window_declined / pct_window_total * 100) if pct_window_total else 0.0
+    window_approve_pct = (window_approved / window_total * 100) if window_total else 0.0
+    window_decline_pct = (window_declined / window_total * 100) if window_total else 0.0
 
     auth_type_window_counts = {
-        label: len([t for t in dq if now - t <= pct_window]) for label, dq in AUTH_TYPE_TIMESTAMPS.items()
+        label: len([t for t in dq if now - t <= window]) for label, dq in AUTH_TYPE_TIMESTAMPS.items()
     }
     auth_type_total = sum(auth_type_window_counts.values())
     auth_type_pct = {

@@ -4,13 +4,28 @@ Issuer simulator.
 A single process stands in for every simulated card issuer (one per card
 network -- see services/common/reference.issuer_id_for_network). For each
 authorization request forwarded by the gateway it: verifies the PIN when
-one was presented (by decrypting both the incoming, gateway-translated
-PIN block and the card's own at-rest PIN block with that issuer's ZPK and
-comparing the recovered digit strings -- a "local PIN check", one of the
-two verification styles real issuers use, the other being PVV-based
-verification which needs a PIN Verification Key this project doesn't
-model), checks the card hasn't expired, and otherwise picks a response
-code from the same weighted distribution the old static generator used.
+one was presented, verifies the CVV2 for card-not-present transactions,
+checks the card hasn't expired, and otherwise picks a response code from
+the same weighted distribution the old static generator used.
+
+CVV2 verification is a plain string comparison against the card record's
+own `cvv` field (never encrypted, unlike the PIN) -- realistic, since CVV
+data travels in the clear within the authorization message itself in
+real systems too (protected only by the transport, e.g. TLS, which this
+project doesn't model), whereas a PIN specifically requires field-level
+encryption end-to-end even over an already-encrypted transport. That
+asymmetry is itself part of what this project models.
+
+PIN verification decrypts two *different* keys independently rather than
+one shared key: the incoming, gateway-translated PIN block under this
+issuer's *transit* ZPK (the zone key for the gateway<->issuer link), and
+the card's at-rest PIN block under a separate *storage* ZPK (see
+scripts/generate_data.py's generate_keys()) -- then compares the two
+recovered PIN digit strings. This is a "local PIN check", one of the two
+verification styles real issuers use (the other, PVV-based verification,
+needs a separate PIN Verification Key this project doesn't model). Using
+one key for both would mean the interchange zone and the at-rest vault
+were silently the same trust boundary, which they must not be.
 
 Pausing the issuer (via the dashboard) does not refuse or drop
 connections -- it holds each one open, past its normal random processing
@@ -43,7 +58,8 @@ ISSUER_PORT = int(os.environ.get("ISSUER_PORT", "8584"))
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 
 CARDS_BY_PAN = {}
-ISSUER_KEYS = {}
+ISSUER_TRANSIT_KEYS = {}
+ISSUER_STORAGE_KEYS = {}
 _http = httpx.AsyncClient(timeout=2.0)
 _control = ControlPoller(_http, DASHBOARD_URL)
 
@@ -67,14 +83,20 @@ def decide_response(req: dict) -> tuple[str, str | None]:
 
     extra = req.get("extra_json", {})
     if extra.get("pin_present"):
-        issuer_key = ISSUER_KEYS[card["issuer_id"]]
+        transit_key = ISSUER_TRANSIT_KEYS[card["issuer_id"]]
+        storage_key = ISSUER_STORAGE_KEYS[card["issuer_id"]]
         try:
-            entered_pin = iso4_decode_pin_block(req["pin_block"], pan, issuer_key)
-            real_pin = iso4_decode_pin_block(bytes.fromhex(card["pin_block_at_rest_hex"]), pan, issuer_key)
+            entered_pin = iso4_decode_pin_block(req["pin_block"], pan, transit_key)
+            real_pin = iso4_decode_pin_block(bytes.fromhex(card["pin_block_at_rest_hex"]), pan, storage_key)
         except (ValueError, KeyError):
             return "55", None
         if entered_pin != real_pin:
             return "55", None
+
+    if extra.get("cvv_present"):
+        entered_cvv = extra.get("cvv")
+        if not entered_cvv or entered_cvv != card["cvv"]:
+            return "82", None
 
     code, _desc, status = random.choices(
         reference.GENERIC_RESPONSE_CODES, weights=reference.GENERIC_RESPONSE_WEIGHTS, k=1
@@ -124,8 +146,9 @@ async def main():
     cards = load_json(CARDS_PATH)
     CARDS_BY_PAN.update({c["pan"]: c for c in cards})
     keys = load_json(KEYS_PATH)
-    ISSUER_KEYS.update({iid: key_from_hex(k) for iid, k in keys["issuers"].items()})
-    log.info("loaded %d cards across %d issuers", len(CARDS_BY_PAN), len(ISSUER_KEYS))
+    ISSUER_TRANSIT_KEYS.update({iid: key_from_hex(k) for iid, k in keys["issuers_transit"].items()})
+    ISSUER_STORAGE_KEYS.update({iid: key_from_hex(k) for iid, k in keys["issuers_storage"].items()})
+    log.info("loaded %d cards across %d issuers", len(CARDS_BY_PAN), len(ISSUER_TRANSIT_KEYS))
 
     server = await asyncio.start_server(handle_gateway, ISSUER_HOST, ISSUER_PORT)
     log.info("issuer-simulator listening on %s:%s", ISSUER_HOST, ISSUER_PORT)

@@ -74,7 +74,7 @@ jobs:
 
           bad = 0
           for c in cards:
-              zpk = key_from_hex(keys["issuers"][c["issuer_id"]])
+              zpk = key_from_hex(keys["issuers_storage"][c["issuer_id"]])
               block = bytes.fromhex(c["pin_block_at_rest_hex"])
               try:
                   pin = iso4_decode_pin_block(block, c["pan"], zpk)

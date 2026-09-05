@@ -60,18 +60,19 @@ RESPONSE_CODES = [
     ("62", "Restricted card", "DECLINED"),
     ("65", "Exceeds withdrawal frequency limit", "DECLINED"),
     ("75", "PIN tries exceeded", "DECLINED"),
+    ("82", "Incorrect CVV", "DECLINED"),
     ("91", "Issuer or switch inoperative", "DECLINED"),
     ("96", "System malfunction", "DECLINED"),
 ]
 
 # Codes the issuer-simulator's generic weighted pick is allowed to choose
 # (i.e. everything except the ones reserved for an explicit check above).
-_RESERVED = {"54", "55"}
+_RESERVED = {"54", "55", "82"}
 GENERIC_RESPONSE_CODES = [c for c in RESPONSE_CODES if c[0] not in _RESERVED]
-# weighted toward approval -- 85% here, with a small additional sliver of
+# weighted toward approval -- 95% here, with a small additional sliver of
 # real-world declines from the PIN-mismatch (55) and expired-card (54)
-# checks elsewhere, keeps the overall approve rate comfortably above 80%
-GENERIC_RESPONSE_WEIGHTS = [85] + [15 / (len(GENERIC_RESPONSE_CODES) - 1)] * (len(GENERIC_RESPONSE_CODES) - 1)
+# checks elsewhere, keeps the overall approve rate at approximately 95%
+GENERIC_RESPONSE_WEIGHTS = [95] + [5 / (len(GENERIC_RESPONSE_CODES) - 1)] * (len(GENERIC_RESPONSE_CODES) - 1)
 
 RESPONSE_CODE_MAP = {code: (desc, status) for code, desc, status in RESPONSE_CODES}
 
@@ -124,6 +125,13 @@ TXN_TYPES = ["PURCHASE", "PURCHASE", "PURCHASE", "PURCHASE", "REFUND", "PREAUTH"
 POS_ENTRY_MODES = ["CHIP", "CHIP", "CONTACTLESS", "CONTACTLESS", "SWIPE", "ECOM", "MANUAL"]
 PIN_CAPABLE_ENTRY_MODES = {"CHIP", "SWIPE", "CONTACTLESS"}
 PIN_PRESENT_PROBABILITY = {"CHIP": 0.5, "SWIPE": 0.5, "CONTACTLESS": 0.15}
+
+# CVV2 is a card-not-present concept: a customer reads it off the back of
+# the physical card at checkout. Card-present modes verify the card a
+# different way (an EMV cryptogram for chip/contactless, the CVV encoded
+# in track2 for a magstripe swipe -- read off the card, never typed) and
+# never carry a customer-entered CVV2 the way ECOM/MANUAL do.
+CVV_CAPABLE_ENTRY_MODES = {"ECOM", "MANUAL"}
 
 # human-facing auth type labels, keyed by the same entry-mode names used
 # throughout (iso8583.POS_ENTRY_MODE_NAMES) -- single source of truth for

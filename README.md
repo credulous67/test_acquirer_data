@@ -49,7 +49,7 @@ software with no HSM hardware:
 ```mermaid
 flowchart LR
     M["<b>merchant-simulator</b><br/>all merchants, one container<br/><i>jittered per-merchant start + send timing</i>"]
-    G["<b>acquirer-gateway</b><br/><i>random processing delay</i><br/>translates PIN block:<br/>terminal ZPK → issuer ZPK<br/>persists to DB"]
+    G["<b>acquirer-gateway</b><br/><i>random processing delay</i><br/>translates PIN block:<br/>terminal ZPK → issuer transit ZPK<br/>persists to DB"]
     I["<b>issuer-simulator</b><br/>all issuers, one container<br/><i>random processing delay</i>"]
     DB[("PostgreSQL<br/>swappable, see below")]
     D["<b>dashboard</b><br/>stats, pause/resume, rate"]
@@ -122,10 +122,15 @@ data/
 │   ├── authorizations.json        request templates the merchant-simulator replays
 │   │                               live (no response fields — those are decided
 │   │                               live by the issuer-simulator, not pre-baked)
-│   └── customer_pins.json         TEST-ONLY oracle, see warning above
+│   ├── customer_pins.json         TEST-ONLY oracle, see warning above
+│   └── customer_cvvs.json         TEST-ONLY oracle: the CVV2 each fake
+│                                   cardholder reads off their card for a
+│                                   card-not-present purchase
 │
 ├── keys/
-│   └── keys.json                  TEST-ONLY plaintext ZPKs, see warning above
+│   └── keys.json                  TEST-ONLY plaintext ZPKs (terminal, plus
+│                                   a separate transit and storage ZPK per
+│                                   issuer -- see "The PIN / ZPK model")
 │
 └── reference/                     generic, non-cardholder payment reference data
     ├── mcc_codes.json
@@ -144,30 +149,42 @@ generate.
 
 Some transactions carry a PIN (card-present entry modes only — CHIP and
 SWIPE at 50%, CONTACTLESS at 15%; never ECOM/MANUAL, which have no PIN
-pad). Each card has one AES-128 ZPK per **terminal** and one per
-**issuer** (one simulated issuer per card network — `ISSUER-VISA`,
-`ISSUER-MASTERCARD`, etc; the issuer-simulator container hosts all of
-them):
+pad). Each terminal has one AES-128 ZPK, and each issuer (one simulated
+issuer per card network — `ISSUER-VISA`, `ISSUER-MASTERCARD`, etc; the
+issuer-simulator container hosts all of them) has **two**, not one:
+
+- a **transit ZPK** — the zone key for the gateway↔issuer link, used to
+  receive PIN blocks arriving with a live authorization;
+- a **storage ZPK** — used only to protect that issuer's own PIN store
+  at rest, on `cards.json`'s `pin_block_at_rest_hex`.
+
+These are deliberately different keys. A real issuer never uses its
+interchange/zone key to protect data at rest — collapsing them into one
+key would mean the "PIN arriving over the wire" trust boundary and the
+"PIN vault" trust boundary were silently the same thing, which they must
+not be, and PIN validation would then also fail to reflect a real
+issuer's actual verification step.
 
 1. The merchant-simulator builds an **ISO 9564-1 Format 4 (AES) PIN
    block** for the entered PIN, enciphered under that **terminal's**
    ZPK (`services/common/crypto.py`). ~3% of the time it perturbs one
-   digit first, to simulate a mistyped PIN.
+   digit first, to simulate a mistyped PIN arriving from the acquirer
+   side — a legitimate source of `55` declines alongside the check below.
 2. The gateway **translates** the block: decrypts it with the terminal's
    ZPK, then re-enciphers it (with a fresh random pad) under the
-   destination **issuer's** ZPK, before forwarding to the issuer. In a
-   real acquiring host this happens inside an HSM, which never releases
-   the clear PIN outside its own boundary; here it's a plain Python
-   function because this is a software simulation harness, not a
-   certified cryptographic device.
-3. The issuer-simulator decrypts the incoming block and the card's
-   at-rest block (`cards.json`'s `pin_block_at_rest_hex`, itself an
-   ISO-4 block enciphered under that same issuer's ZPK — never a
-   plaintext PIN anywhere on disk) and compares the recovered PIN
-   digits — a "local PIN check", one of the two verification styles real
-   issuers use (the other, PVV-based verification, needs a separate PIN
-   Verification Key this project doesn't model). A mismatch declines
-   with response code `55`.
+   destination issuer's **transit** ZPK, before forwarding to the
+   issuer. In a real acquiring host this happens inside an HSM, which
+   never releases the clear PIN outside its own boundary; here it's a
+   plain Python function because this is a software simulation harness,
+   not a certified cryptographic device.
+3. The issuer-simulator decrypts the incoming block under its **transit**
+   ZPK and the card's at-rest block under its separate **storage** ZPK —
+   two independent decryptions, never a plaintext PIN anywhere on disk —
+   then compares the two recovered PIN digit strings. This is a "local
+   PIN check", one of the two verification styles real issuers use (the
+   other, PVV-based verification, needs a separate PIN Verification Key
+   this project doesn't model). A mismatch declines with response code
+   `55`.
 
 The ISO-4 implementation follows the standard's general structure
 (control nibble + PIN length + digits + random padding for the PIN
@@ -177,6 +194,24 @@ project's own encode/decode/translate calls — it is not a certified,
 byte-for-byte implementation of the standard, and must never be used
 outside this test context. See `services/common/test_crypto.py` for the
 round-trip/translation tests.
+
+## CVV2 verification
+
+Card-not-present transactions (ECOM and MANUAL entry modes) always carry
+a CVV2, read by the fake cardholder off the back of their card — a
+different concept from the PIN above, and handled very differently:
+never encrypted. The issuer-simulator compares it as a plain string
+against the card record's own `cvv` field and declines with `82` on a
+mismatch (~3% of the time, from `services/merchant_simulator/app.py`'s
+`CVV_TYPO_PROBABILITY`, the same simulated-typo mechanism the PIN uses).
+
+This is a deliberate, realistic asymmetry, not an oversight: PIN blocks
+need field-level encryption end-to-end because a PIN grants direct
+access to funds and PCI PIN Security requirements treat it accordingly,
+even over an already-encrypted transport; CVV2 has no equivalent
+requirement and travels in the clear within the authorization message
+itself in real systems too (protected only by the transport, e.g. TLS,
+which this project doesn't model).
 
 ## The ISO 8583 message model
 
@@ -198,8 +233,8 @@ ISO 8583 host-to-host links use.
 
 **http://localhost:8080** shows:
 
-- Stat cards: live TPS (5-second rolling window), lifetime approve/
-  decline counts + percentages (weighted ~85% approve by default, see
+- Stat cards: live TPS (20-second rolling window), lifetime approve/
+  decline counts + percentages (weighted ~95% approve by default, see
   `services/common/reference.GENERIC_RESPONSE_WEIGHTS`), the number of
   **outstanding** authorizations (received but not yet responded to),
   and the **average end-to-end latency** (`received_at` → `completed_at`,
@@ -208,7 +243,7 @@ ISO 8583 host-to-host links use.
 - Three side-by-side charts, all a 30-minute rolling window (one point/sec):
   **Overall TPS** (a single line); **Approved vs declined**; and
   **Auth type** — both of the latter are stacked area charts of each
-  category's *share* of the last 5 seconds, always summing to 100% (a
+  category's *share* of the last 20 seconds, always summing to 100% (a
   different, windowed number from the lifetime approve/decline
   percentages in the stat cards above, which barely move once there's
   been a lot of traffic). Auth type is derived from the ISO 8583 POS
@@ -216,7 +251,10 @@ ISO 8583 host-to-host links use.
   Contactless, Magstripe (swipe), and two card-not-present flavours,
   CNP (eCom) and CNP (MOTO).
 - A live-scrolling feed of completed transactions, including each one's
-  auth type and end-to-end duration.
+  auth type, response code with its plain-English meaning inline (e.g.
+  `55 (Incorrect PIN)`, from `services/common/reference.RESPONSE_CODES`
+  — the same table the issuer-simulator itself picks from), and
+  end-to-end duration.
 - **Pause merchant / Pause issuer** — independent controls:
   - *Pause merchant* stops the merchant-simulator from originating *new*
     transactions; already-sent ones complete normally.

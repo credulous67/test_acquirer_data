@@ -12,10 +12,13 @@ the gateway and issuer-simulator services. All this script produces is:
     reference tables) -- data/seed/*.json and data/reference/*
   - a pool of authorization *request* templates the merchant-simulator
     replays as live traffic -- data/seed/authorizations.json
-  - the AES keys (ZPKs) used to encipher PIN blocks in transit --
-    data/keys/keys.json
+  - the AES ZPKs -- one per terminal, and two per issuer (a transit ZPK
+    for PIN blocks arriving from the gateway, a separate storage ZPK for
+    the at-rest PIN block on each card) -- data/keys/keys.json
   - a TEST-ONLY oracle of what each simulated cardholder types at the PIN
-    pad -- data/seed/customer_pins.json
+    pad -- data/seed/customer_pins.json -- and, separately, of the CVV2
+    they read off the back of their card for a card-not-present purchase
+    -- data/seed/customer_cvvs.json
 
 ALL data produced by this script is fake:
   - PANs are built from publicly-documented test/sandbox BIN prefixes
@@ -174,13 +177,20 @@ def generate_terminals(merchants, per_merchant_range=(1, 4)):
     return terminals
 
 
-def generate_cards_and_pins(n, issuer_zpks):
-    """Returns (cards, customer_pins). cards never carries a plaintext
-    PIN -- only an ISO-4 block, enciphered under the owning issuer's ZPK,
-    the way an issuer's own PIN store would hold it. customer_pins is a
-    separate, clearly test-only oracle (see module docstring)."""
+def generate_cards_and_pins(n, issuer_storage_zpks):
+    """Returns (cards, customer_pins, customer_cvvs). cards never carries
+    a plaintext PIN -- only an ISO-4 block, enciphered under the owning
+    issuer's *storage* ZPK (a different key from the transit ZPK the
+    gateway translates incoming auth PIN blocks into -- see
+    generate_keys), the way an issuer's own PIN store would hold it.
+    customer_pins and customer_cvvs are separate, clearly test-only
+    oracles (see module docstring) standing in for what the (fake)
+    cardholder has memorised or reads off their physical card -- neither
+    the merchant-simulator nor the gateway ever gets to see the issuer's
+    own card vault (cards.json) directly."""
     cards = []
     customer_pins = {}
+    customer_cvvs = {}
     for i in range(n):
         network, prefix, length, cvv_len = random.choice(reference.NETWORKS)
         pan = generate_pan(prefix, length)
@@ -189,15 +199,16 @@ def generate_cards_and_pins(n, issuer_zpks):
         card_id = gen_id("CARD", i + 1, 6)
         issuer_id = reference.issuer_id_for_network(network)
         pin = random_pin()
+        cvv = random_cvv(cvv_len)
 
-        pin_block = iso4_encode_pin_block(pin, pan, issuer_zpks[issuer_id])
+        pin_block = iso4_encode_pin_block(pin, pan, issuer_storage_zpks[issuer_id])
 
         cards.append({
             "card_id": card_id,
             "pan": pan,
             "cardholder_name": random_name(),
             "expiry_date": expiry,
-            "cvv": random_cvv(cvv_len),
+            "cvv": cvv,
             "track2": build_track2(pan, expiry),
             "card_network": network,
             "issuer_id": issuer_id,
@@ -208,12 +219,17 @@ def generate_cards_and_pins(n, issuer_zpks):
         # keyed by PAN, not card_id: a real terminal only ever has the
         # PAN it just read, never an acquirer/issuer-internal surrogate key
         customer_pins[pan] = pin
-    return cards, customer_pins
+        customer_cvvs[pan] = cvv
+    return cards, customer_pins, customer_cvvs
 
 
 def pin_present_for_entry_mode(pos_entry_mode: str) -> bool:
     p = reference.PIN_PRESENT_PROBABILITY.get(pos_entry_mode, 0.0)
     return random.random() < p
+
+
+def cvv_present_for_entry_mode(pos_entry_mode: str) -> bool:
+    return pos_entry_mode in reference.CVV_CAPABLE_ENTRY_MODES
 
 
 def generate_authorizations(n, merchants, terminals, cards, days_back=30):
@@ -253,6 +269,7 @@ def generate_authorizations(n, merchants, terminals, cards, days_back=30):
             "mcc": merchant["mcc"],
             "pos_entry_mode": pos_entry_mode,
             "pin_present": pin_present_for_entry_mode(pos_entry_mode),
+            "cvv_present": cvv_present_for_entry_mode(pos_entry_mode),
             "stan": f"{random.randint(0, 999999):06d}",
             "retrieval_reference_number": "".join(str(random.randint(0, 9)) for _ in range(12)),
             "acquirer_id": reference.ACQUIRER_ID,
@@ -262,9 +279,20 @@ def generate_authorizations(n, merchants, terminals, cards, days_back=30):
 
 
 def generate_keys(terminals):
+    """Two distinct ZPKs per issuer, not one: a *transit* ZPK -- the zone
+    key the acquirer gateway translates an incoming PIN block into before
+    forwarding to that issuer -- and a separate *storage* ZPK the issuer
+    uses to protect its own at-rest PIN store. A real issuer never uses
+    its interchange/zone key to protect data at rest, and using the same
+    key for both here would mean receiving and storage are silently the
+    same trust boundary, which they must not be: PIN validation has to
+    decrypt the incoming block under the transit ZPK and the at-rest
+    block under the storage ZPK independently, then compare the two
+    recovered PINs (see services/issuer_simulator/app.py)."""
     terminal_zpks = {t["terminal_id"]: generate_aes_key() for t in terminals}
-    issuer_zpks = {f"ISSUER-{name}": generate_aes_key() for name in reference.NETWORK_NAMES}
-    return terminal_zpks, issuer_zpks
+    issuer_transit_zpks = {f"ISSUER-{name}": generate_aes_key() for name in reference.NETWORK_NAMES}
+    issuer_storage_zpks = {f"ISSUER-{name}": generate_aes_key() for name in reference.NETWORK_NAMES}
+    return terminal_zpks, issuer_transit_zpks, issuer_storage_zpks
 
 
 # --------------------------------------------------------------------------
@@ -347,8 +375,8 @@ def main():
 
     merchants = generate_merchants(args.merchants)
     terminals = generate_terminals(merchants)
-    terminal_zpks, issuer_zpks = generate_keys(terminals)
-    cards, customer_pins = generate_cards_and_pins(args.cards, issuer_zpks)
+    terminal_zpks, issuer_transit_zpks, issuer_storage_zpks = generate_keys(terminals)
+    cards, customer_pins, customer_cvvs = generate_cards_and_pins(args.cards, issuer_storage_zpks)
     auths = generate_authorizations(args.authorizations, merchants, terminals, cards, args.days_back)
 
     out = args.out
@@ -359,11 +387,15 @@ def main():
     write_json(os.path.join(out, "seed", "cards.json"), cards)
     write_json(os.path.join(out, "seed", "authorizations.json"), auths)
     write_json(os.path.join(out, "seed", "customer_pins.json"), customer_pins)
+    write_json(os.path.join(out, "seed", "customer_cvvs.json"), customer_cvvs)
 
     # --- keys (TEST-ONLY plaintext custody -- see module docstring) ---
+    # issuers_transit and issuers_storage are deliberately separate key
+    # sets per issuer -- see generate_keys()'s docstring.
     write_json(os.path.join(out, "keys", "keys.json"), {
         "terminals": {tid: key_to_hex(k) for tid, k in terminal_zpks.items()},
-        "issuers": {iid: key_to_hex(k) for iid, k in issuer_zpks.items()},
+        "issuers_transit": {iid: key_to_hex(k) for iid, k in issuer_transit_zpks.items()},
+        "issuers_storage": {iid: key_to_hex(k) for iid, k in issuer_storage_zpks.items()},
     })
 
     # --- generic, non-cardholder reference data ---

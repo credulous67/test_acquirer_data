@@ -6,8 +6,9 @@ one asyncio task per merchant, each started after its own random jitter
 so traffic doesn't begin in lock-step, then looping forever, drawing a
 request template from that merchant's own pool in data/seed/authorizations.json,
 freshening its identifiers/timestamp, occasionally attaching a PIN block
-(built fresh, enciphered under that terminal's own ZPK), and sending it to
-the gateway over a new TCP connection per transaction.
+(built fresh, enciphered under that terminal's own ZPK) or a CVV2 (for
+card-not-present templates), and sending it to the gateway over a new
+TCP connection per transaction.
 
 Overall traffic rate is TARGET_TPS, split across merchants in proportion
 to how many template transactions they have (busier merchants in the
@@ -36,6 +37,7 @@ MERCHANTS_PATH = os.path.join(SEED_DIR, "seed", "merchants.json")
 TERMINALS_PATH = os.path.join(SEED_DIR, "seed", "terminals.json")
 AUTHS_PATH = os.path.join(SEED_DIR, "seed", "authorizations.json")
 CUSTOMER_PINS_PATH = os.path.join(SEED_DIR, "seed", "customer_pins.json")
+CUSTOMER_CVVS_PATH = os.path.join(SEED_DIR, "seed", "customer_cvvs.json")
 KEYS_PATH = os.path.join(SEED_DIR, "keys", "keys.json")
 
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "gateway")
@@ -44,22 +46,23 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 TARGET_TPS = float(os.environ.get("TARGET_TPS", "20"))
 
 PIN_TYPO_PROBABILITY = 0.03
+CVV_TYPO_PROBABILITY = 0.03
 
 _http = httpx.AsyncClient(timeout=2.0)
 _control = ControlPoller(_http, DASHBOARD_URL)
 _stop_event = asyncio.Event()  # set on SIGTERM/SIGINT: stop *originating* new sends
 
 
-def maybe_typo(pin: str) -> str:
-    if random.random() >= PIN_TYPO_PROBABILITY:
-        return pin
-    pos = random.randrange(len(pin))
-    digits = list(pin)
+def maybe_typo(value: str, probability: float) -> str:
+    if random.random() >= probability:
+        return value
+    pos = random.randrange(len(value))
+    digits = list(value)
     digits[pos] = str((int(digits[pos]) + random.randint(1, 9)) % 10)
     return "".join(digits)
 
 
-def build_live_message(template: dict, terminal_key, customer_pins) -> dict:
+def build_live_message(template: dict, terminal_key, customer_pins, customer_cvvs) -> dict:
     now = datetime.now(timezone.utc)
     amount_minor = round(float(template["amount"]) * 100)
     exp_mm, exp_yy = template["expiry_date"].split("/")
@@ -84,14 +87,20 @@ def build_live_message(template: dict, terminal_key, customer_pins) -> dict:
             "transaction_type": template["transaction_type"],
             "currency_code_alpha": template["currency_code_alpha"],
             "pin_present": template["pin_present"],
+            "cvv_present": template.get("cvv_present", False),
         },
     }
 
     if template["pin_present"]:
         real_pin = customer_pins.get(template["pan"])
         if real_pin:
-            entered_pin = maybe_typo(real_pin)
+            entered_pin = maybe_typo(real_pin, PIN_TYPO_PROBABILITY)
             values["pin_block"] = iso4_encode_pin_block(entered_pin, template["pan"], terminal_key)
+
+    if template.get("cvv_present"):
+        real_cvv = customer_cvvs.get(template["pan"])
+        if real_cvv:
+            values["extra_json"]["cvv"] = maybe_typo(real_cvv, CVV_TYPO_PROBABILITY)
 
     return values
 
@@ -112,7 +121,7 @@ async def send_transaction(values: dict):
 _BACKGROUND_TASKS: set = set()
 
 
-async def send_one(merchant_id: str, template: dict, terminal_key, customer_pins: dict):
+async def send_one(merchant_id: str, template: dict, terminal_key, customer_pins: dict, customer_cvvs: dict):
     """Runs as its own background task, independent of the merchant's
     send-pacing loop below -- if the gateway/issuer are slow to respond
     (e.g. the issuer is paused, see services/dashboard/app.py), this
@@ -122,7 +131,7 @@ async def send_one(merchant_id: str, template: dict, terminal_key, customer_pins
     at one per merchant."""
     try:
         await asyncio.sleep(random.uniform(0.01, 0.1))  # terminal processing time
-        values = build_live_message(template, terminal_key, customer_pins)
+        values = build_live_message(template, terminal_key, customer_pins, customer_cvvs)
         await send_transaction(values)
     except Exception as exc:
         # a single bad/dropped/stuck transaction must never take down
@@ -141,7 +150,7 @@ async def _sleep_or_stop(seconds: float) -> bool:
         return False
 
 
-async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: dict, customer_pins: dict):
+async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: dict, customer_pins: dict, customer_cvvs: dict):
     if await _sleep_or_stop(random.uniform(0, 10)):
         return
     log.info("merchant %s starting, base rate %.3f tx/s over %d templates", merchant_id, lam, len(pool))
@@ -169,17 +178,18 @@ async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: 
         # under a paused issuer, until traced to this. Keeping a strong
         # reference in _BACKGROUND_TASKS (discarded once the task finishes)
         # is the standard fix.
-        task = asyncio.create_task(send_one(merchant_id, template, terminal_key, customer_pins))
+        task = asyncio.create_task(send_one(merchant_id, template, terminal_key, customer_pins, customer_cvvs))
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def main():
-    await wait_for_files([MERCHANTS_PATH, TERMINALS_PATH, AUTHS_PATH, CUSTOMER_PINS_PATH, KEYS_PATH])
+    await wait_for_files([MERCHANTS_PATH, TERMINALS_PATH, AUTHS_PATH, CUSTOMER_PINS_PATH, CUSTOMER_CVVS_PATH, KEYS_PATH])
 
     merchants = load_json(MERCHANTS_PATH)
     auths = load_json(AUTHS_PATH)
     customer_pins = load_json(CUSTOMER_PINS_PATH)
+    customer_cvvs = load_json(CUSTOMER_CVVS_PATH)
     keys = load_json(KEYS_PATH)
     terminal_keys = {tid: key_from_hex(k) for tid, k in keys["terminals"].items()}
 
@@ -196,7 +206,7 @@ async def main():
             continue
         lam = TARGET_TPS * (len(pool) / total)
         merchant_ids.append(m["merchant_id"])
-        tasks.append(run_merchant(m["merchant_id"], pool, lam, terminal_keys, customer_pins))
+        tasks.append(run_merchant(m["merchant_id"], pool, lam, terminal_keys, customer_pins, customer_cvvs))
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

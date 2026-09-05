@@ -4,11 +4,15 @@ Acquirer gateway.
 Sits between the merchant-simulator and the issuer-simulator: accepts an
 ISO 8583 authorization request over TCP from a merchant, persists it,
 translates any PIN block from the sending terminal's ZPK to the owning
-issuer's ZPK, forwards the request on to the issuer-simulator over its
-own TCP connection, waits for the (mutated) response, persists it, and
-returns it to the merchant. Every stage is reported to the dashboard as a
-best-effort event POST so the web UI can show the live flow; a dashboard
-outage never blocks the authorization path itself.
+issuer's *transit* ZPK -- the zone key for this interchange link, a
+different key from the one that issuer uses to protect its own PIN
+store at rest (see services/issuer_simulator/app.py and
+scripts/generate_data.py's generate_keys()) -- forwards the request on
+to the issuer-simulator over its own TCP connection, waits for the
+(mutated) response, persists it, and returns it to the merchant. Every
+stage is reported to the dashboard as a best-effort event POST so the
+web UI can show the live flow; a dashboard outage never blocks the
+authorization path itself.
 
 PIN translation happens here in plain Python because this is a software
 simulation harness -- in a production acquiring host this step runs
@@ -16,6 +20,7 @@ inside an HSM, which never releases the clear PIN block outside its own
 boundary. See services/common/crypto.py and README.md for more on this.
 """
 import asyncio
+import json
 import os
 import random
 from datetime import datetime, timezone
@@ -39,9 +44,18 @@ ISSUER_HOST = os.environ.get("ISSUER_HOST", "issuer-simulator")
 ISSUER_PORT = int(os.environ.get("ISSUER_PORT", "8584"))
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 
+# Diagnostic-only: dump the first N raw ISO 8583 messages crossing the
+# acquirer<->issuer interchange link (both directions -- the gateway is
+# the one place that sees both) to a JSONL file. Off by default (limit 0);
+# set ISO8583_DUMP_LIMIT to enable for a one-off capture.
+ISO8583_DUMP_PATH = os.environ.get("ISO8583_DUMP_PATH", "/tmp/iso8583_dump.jsonl")
+ISO8583_DUMP_LIMIT = int(os.environ.get("ISO8583_DUMP_LIMIT", "0"))
+
 TERMINAL_KEYS = {}
-ISSUER_KEYS = {}
+ISSUER_TRANSIT_KEYS = {}
 _http = httpx.AsyncClient(timeout=2.0)
+_dump_count = 0
+_dump_lock = asyncio.Lock()
 
 
 async def report_event(stage: str, **fields):
@@ -56,11 +70,37 @@ def now():
     return datetime.now(timezone.utc)
 
 
+async def dump_message(direction: str, mti: str, values: dict):
+    global _dump_count
+    if ISO8583_DUMP_LIMIT <= 0:
+        return
+    async with _dump_lock:
+        if _dump_count >= ISO8583_DUMP_LIMIT:
+            return
+        _dump_count += 1
+        seq = _dump_count
+    fields = {k: (v.hex() if isinstance(v, (bytes, bytearray)) else v) for k, v in values.items()}
+    entry = {
+        "seq": seq,
+        "direction": direction,  # "acquirer_to_issuer" or "issuer_to_acquirer"
+        "mti": mti,
+        "raw_hex": iso8583.pack(mti, values).hex(),
+        "fields": fields,
+    }
+    with open(ISO8583_DUMP_PATH, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    if seq >= ISO8583_DUMP_LIMIT:
+        log.info("ISO8583 dump complete: %d messages written to %s", seq, ISO8583_DUMP_PATH)
+
+
 async def forward_to_issuer(mti: str, values: dict):
+    await dump_message("acquirer_to_issuer", mti, values)
     reader, writer = await asyncio.open_connection(ISSUER_HOST, ISSUER_PORT)
     try:
         await iso8583.write_message(writer, mti, values)
-        return await iso8583.read_message(reader)
+        resp_mti, resp = await iso8583.read_message(reader)
+        await dump_message("issuer_to_acquirer", resp_mti, resp)
+        return resp_mti, resp
     finally:
         writer.close()
         await writer.wait_closed()
@@ -103,7 +143,9 @@ async def handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWr
             "completed", transaction_id=txn_id, merchant_id=req.get("merchant_id"),
             terminal_id=req.get("terminal_id"), card_network=extra.get("card_network"),
             amount=str(req.get("amount_minor_units", "0")), currency=extra.get("currency_code_alpha"),
-            response_code="96", response_status="DECLINED", duration_ms=duration_ms,
+            response_code="96", response_status="DECLINED",
+            response_desc=reference.RESPONSE_CODE_MAP.get("96", ("Unknown",))[0],
+            duration_ms=duration_ms,
             auth_type=reference.AUTH_TYPE_LABELS.get(fallback_pos_entry_mode, fallback_pos_entry_mode),
         )
         try:
@@ -161,8 +203,8 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
     out_values = dict(req)
     if pin_present and "pin_block" in req:
         terminal_key = TERMINAL_KEYS[req["terminal_id"]]
-        issuer_key = ISSUER_KEYS[issuer_id]
-        out_values["pin_block"] = translate_pin_block(req["pin_block"], req["pan"], terminal_key, issuer_key)
+        issuer_transit_key = ISSUER_TRANSIT_KEYS[issuer_id]
+        out_values["pin_block"] = translate_pin_block(req["pin_block"], req["pan"], terminal_key, issuer_transit_key)
 
     forwarded_at = now()
     await db.update_response(txn_id, {"forwarded_at": forwarded_at})
@@ -179,7 +221,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
     await asyncio.sleep(random.uniform(0.02, 0.1))
 
     response_code = resp.get("response_code", "96")
-    _desc, response_status = reference.RESPONSE_CODE_MAP.get(response_code, ("Unknown", "DECLINED"))
+    response_desc, response_status = reference.RESPONSE_CODE_MAP.get(response_code, ("Unknown", "DECLINED"))
     auth_code = resp.get("auth_code")
 
     completed_at = now()
@@ -198,7 +240,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
         terminal_id=req["terminal_id"], card_network=card_network,
         amount=str(req["amount_minor_units"]), currency=extra.get("currency_code_alpha"),
         response_code=response_code, response_status=response_status,
-        duration_ms=duration_ms, auth_type=auth_type,
+        response_desc=response_desc, duration_ms=duration_ms, auth_type=auth_type,
     )
 
     await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
@@ -212,7 +254,7 @@ async def main():
     await wait_for_files([KEYS_PATH])
     keys = load_json(KEYS_PATH)
     TERMINAL_KEYS.update({tid: key_from_hex(k) for tid, k in keys["terminals"].items()})
-    ISSUER_KEYS.update({iid: key_from_hex(k) for iid, k in keys["issuers"].items()})
+    ISSUER_TRANSIT_KEYS.update({iid: key_from_hex(k) for iid, k in keys["issuers_transit"].items()})
 
     await db.init_db()
 
