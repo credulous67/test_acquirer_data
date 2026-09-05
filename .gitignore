@@ -1,1 +1,10 @@
 /data/
+
+# editor / OS cruft
+*.swp
+*.swo
+.DS_Store
+
+# python
+__pycache__/
+*.pyc

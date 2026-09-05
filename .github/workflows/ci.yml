@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  gitignore-check:
+    name: Generated data stays untracked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run generator (small volume smoke test)
+        run: |
+          python3 scripts/generate_data.py --out data \
+            --merchants 5 --cards 50 --authorizations 100 --days-back 7
+
+      - name: Fail if generated data would be tracked
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Generated files under data/ are not covered by .gitignore:"
+            git status --porcelain
+            exit 1
+          fi
+          echo "data/ is correctly ignored — nothing generated shows up as trackable."
+
+      - name: Validate PANs are Luhn-valid
+        run: |
+          python3 - <<'EOF'
+          import csv
+
+          def luhn_ok(num):
+              digits = [int(d) for d in num]
+              digits.reverse()
+              total = 0
+              for i, d in enumerate(digits):
+                  if i % 2 == 1:
+                      d *= 2
+                      if d > 9:
+                          d -= 9
+                  total += d
+              return total % 10 == 0
+
+          bad = 0
+          n = 0
+          with open("data/db/csv/cards.csv") as f:
+              for row in csv.DictReader(f):
+                  n += 1
+                  if not luhn_ok(row["pan"]):
+                      bad += 1
+
+          print(f"{n} PANs checked, {bad} invalid")
+          assert n > 0, "no PANs were generated"
+          assert bad == 0, f"{bad} PAN(s) failed Luhn validation"
+          EOF

@@ -1,5 +1,7 @@
 # Merchant Acquiring Payment Data — Encryption POC Test Set
 
+[![CI](https://github.com/credulous67/test_acquirer_data/actions/workflows/ci.yml/badge.svg)](https://github.com/credulous67/test_acquirer_data/actions/workflows/ci.yml)
+
 Synthetic test data for a merchant-acquiring encryption POC covering
 three common protection patterns: application-level field/column
 encryption, gateway/API tokenization, and transparent file/directory
