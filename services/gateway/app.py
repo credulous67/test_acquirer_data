@@ -25,7 +25,7 @@ import httpx
 
 from services.common import iso8583, reference
 from services.common.crypto import key_from_hex, translate_pin_block
-from services.common.util import load_json, setup_logging, wait_for_files
+from services.common.util import load_json, serve_until_signal, setup_logging, wait_for_files
 from services.gateway import db
 
 log = setup_logging("gateway")
@@ -73,16 +73,40 @@ async def handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWr
     unreachable in a way the inner handler didn't anticipate, etc) --
     a bug in one transaction's handling must never look like a dropped
     connection to the merchant, and must never take down the gateway's
-    event loop."""
-    txn_id = None
+    event loop. It also guarantees a "completed" event always follows a
+    "received" one, even on failure, so the dashboard's outstanding-auth
+    count never drifts from reality."""
     try:
-        txn_id = await _handle_merchant(reader, writer)
+        mti, req = await iso8583.read_message(reader)
+    except (asyncio.IncompleteReadError, ConnectionResetError):
+        writer.close()
+        return
+    txn_id = req.get("transaction_id")
+    received_at = now()
+    extra = req.get("extra_json", {})
+
+    try:
+        await _handle_merchant(mti, req, writer, txn_id, received_at)
     except Exception as exc:
         log.exception("unhandled error processing transaction %s: %s", txn_id, exc)
+        completed_at = now()
+        duration_ms = round((completed_at - received_at).total_seconds() * 1000)
+        try:
+            await db.update_response(txn_id, {
+                "status": "COMPLETED", "response_code": "96", "response_status": "DECLINED",
+                "completed_at": completed_at, "duration_ms": duration_ms,
+            })
+        except Exception:
+            pass
+        await report_event(
+            "completed", transaction_id=txn_id, merchant_id=req.get("merchant_id"),
+            terminal_id=req.get("terminal_id"), card_network=extra.get("card_network"),
+            amount=str(req.get("amount_minor_units", "0")), currency=extra.get("currency_code_alpha"),
+            response_code="96", response_status="DECLINED", duration_ms=duration_ms,
+        )
         try:
             await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
-                "transaction_id": txn_id or "",
-                "response_code": "96",
+                "transaction_id": txn_id or "", "response_code": "96",
             })
         except Exception:
             pass
@@ -94,19 +118,12 @@ async def handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWr
             pass
 
 
-async def _handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    try:
-        mti, req = await iso8583.read_message(reader)
-    except (asyncio.IncompleteReadError, ConnectionResetError):
-        return None
-
-    txn_id = req["transaction_id"]
+async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, txn_id: str, received_at):
     extra = req.get("extra_json", {})
     card_network = extra.get("card_network")
     issuer_id = reference.issuer_id_for_network(card_network)
     pin_present = bool(extra.get("pin_present"))
 
-    received_at = now()
     # simulated gateway ingest/validation processing time
     await asyncio.sleep(random.uniform(0.02, 0.15))
 
@@ -162,6 +179,7 @@ async def _handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamW
     auth_code = resp.get("auth_code")
 
     completed_at = now()
+    duration_ms = round((completed_at - received_at).total_seconds() * 1000)
     await db.update_response(txn_id, {
         "status": "COMPLETED",
         "response_code": response_code,
@@ -169,12 +187,14 @@ async def _handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamW
         "auth_code": auth_code,
         "response_received_at": response_received_at,
         "completed_at": completed_at,
+        "duration_ms": duration_ms,
     })
     await report_event(
         "completed", transaction_id=txn_id, merchant_id=req["merchant_id"],
         terminal_id=req["terminal_id"], card_network=card_network,
         amount=str(req["amount_minor_units"]), currency=extra.get("currency_code_alpha"),
         response_code=response_code, response_status=response_status,
+        duration_ms=duration_ms,
     )
 
     await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
@@ -182,7 +202,6 @@ async def _handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamW
         "response_code": response_code,
         "auth_code": auth_code,
     })
-    return txn_id
 
 
 async def main():
@@ -195,8 +214,7 @@ async def main():
 
     server = await asyncio.start_server(handle_merchant, GATEWAY_HOST, GATEWAY_PORT)
     log.info("gateway listening on %s:%s", GATEWAY_HOST, GATEWAY_PORT)
-    async with server:
-        await server.serve_forever()
+    await serve_until_signal(server, log)
 
 
 if __name__ == "__main__":

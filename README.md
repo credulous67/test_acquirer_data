@@ -202,21 +202,68 @@ ISO 8583 host-to-host links use.
 
 **http://localhost:8080** shows:
 
-- Live TPS (5-second rolling window) and approve/decline counts +
-  percentages, updated over a WebSocket.
-- A live-scrolling feed of completed transactions.
-- **Pause / Resume** — stops the merchant-simulator from starting *new*
-  transactions; in-flight ones complete normally. Takes effect within a
-  couple of seconds (merchants poll for control state every ~2s).
+- Stat cards: live TPS (5-second rolling window), lifetime approve/
+  decline counts + percentages (weighted ~85% approve by default, see
+  `services/common/reference.GENERIC_RESPONSE_WEIGHTS`), the number of
+  **outstanding** authorizations (received but not yet responded to),
+  and the **average end-to-end latency** (`received_at` → `completed_at`,
+  recorded per transaction as `duration_ms` on the gateway's
+  `authorizations` row and in its "completed" dashboard event).
+- Two side-by-side charts, both a 30-minute rolling window (one point/sec):
+  **Overall TPS** (a single line), and **Approved vs declined** — a
+  stacked area chart of each side's *share* of the last 5 seconds, always
+  summing to 100% (this is a different, windowed number from the
+  lifetime approve/decline percentages in the stat cards above, which
+  barely move once there's been a lot of traffic).
+- A live-scrolling feed of completed transactions, including each one's
+  end-to-end duration.
+- **Pause merchant / Pause issuer** — independent controls:
+  - *Pause merchant* stops the merchant-simulator from originating *new*
+    transactions; already-sent ones complete normally.
+  - *Pause issuer* leaves the gateway accepting and forwarding requests
+    as normal, but the issuer-simulator holds each connection open
+    without responding. This is what lets you watch authorizations pile
+    up as "outstanding" with no response — deliberately *not* modelling
+    a network-level outage (which would trigger the acquirer's Stand-In
+    Processing path in a real system), just an issuer that's up but
+    unresponsive at the message level.
+  - Both take effect within a couple of seconds (services poll control
+    state every ~2s) and are independent of each other.
 - **Rate slider (0.1x–10x)** — multiplies every merchant's base send
   rate, which itself is proportional to how many template transactions
   that merchant has in the seed pool.
 
-The TPS chart uses Chart.js from a CDN; if that's blocked (offline
-environment, restrictive network policy) the chart panel shows a
-message instead, but stats, the feed, and pause/resume/rate all keep
-working — a CDN outage was deliberately not allowed to take down the
-rest of the page.
+Chart.js is vendored locally (`services/dashboard/static/vendor/`), not
+loaded from a CDN — the browser only ever talks to the dashboard
+container, so this works with no outbound internet access at all. If
+that file were ever missing (e.g. an image build that dropped it), both
+chart panels show a message instead, but the stat cards, the feed, and
+pause/resume/rate all keep working regardless.
+
+## Shutting down and resuming cleanly
+
+`podman-compose down`/`stop` sends every container SIGTERM at once, which
+is fine most of the time but can leave an authorization stuck mid-flight
+(the gateway had inserted it and forwarded it to the issuer, but never
+got a response before being killed). Two things make a clean stop/resume
+possible:
+
+- Each service traps SIGTERM: the gateway and issuer-simulator stop
+  *accepting new* connections but finish any already in flight (see
+  `services/common/util.serve_until_signal`), and the merchant-simulator
+  stops *originating new* sends but waits for its own in-flight ones to
+  get a response, before exiting. `stop_grace_period: 35s` in
+  `podman-compose.yml` gives them room to do this before podman would
+  otherwise escalate to SIGKILL.
+- `scripts/graceful_shutdown.sh` sequences it further at the whole-stack
+  level: stop the merchant-simulator first, poll the dashboard's
+  `GET /api/stats` until `outstanding` reaches 0 (i.e. the gateway and
+  issuer have finished everything already accepted), *then* stop
+  gateway/issuer-simulator/dashboard/postgres. Named volumes are never
+  touched, so `podman-compose start` afterwards resumes with the same
+  seed data and database contents and nothing left stuck mid-authorization.
+  Pass `--down` if you also want the containers removed (e.g. before
+  rebuilding images) rather than just stopped — volumes are kept either way.
 
 ## Swapping the database
 

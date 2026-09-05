@@ -68,7 +68,10 @@ RESPONSE_CODES = [
 # (i.e. everything except the ones reserved for an explicit check above).
 _RESERVED = {"54", "55"}
 GENERIC_RESPONSE_CODES = [c for c in RESPONSE_CODES if c[0] not in _RESERVED]
-GENERIC_RESPONSE_WEIGHTS = [70] + [30 / (len(GENERIC_RESPONSE_CODES) - 1)] * (len(GENERIC_RESPONSE_CODES) - 1)
+# weighted toward approval -- 85% here, with a small additional sliver of
+# real-world declines from the PIN-mismatch (55) and expired-card (54)
+# checks elsewhere, keeps the overall approve rate comfortably above 80%
+GENERIC_RESPONSE_WEIGHTS = [85] + [15 / (len(GENERIC_RESPONSE_CODES) - 1)] * (len(GENERIC_RESPONSE_CODES) - 1)
 
 RESPONSE_CODE_MAP = {code: (desc, status) for code, desc, status in RESPONSE_CODES}
 

@@ -9,7 +9,8 @@
   <header>
     <h1>Merchant &rarr; Gateway &rarr; Issuer: live authorization flow</h1>
     <div class="controls">
-      <button id="pauseBtn">Pause</button>
+      <button id="merchantPauseBtn">Pause merchant</button>
+      <button id="issuerPauseBtn">Pause issuer</button>
       <label>
         Rate
         <input type="range" id="rateSlider" min="0.1" max="10" step="0.1" value="1">
@@ -31,11 +32,27 @@
       <div class="stat-value" id="declinedValue">0</div>
       <div class="stat-label">Declined (<span id="declinedPct">0</span>%)</div>
     </div>
+    <div class="stat-card outstanding">
+      <div class="stat-value" id="outstandingValue">0</div>
+      <div class="stat-label">Outstanding (no response)</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="latencyValue">0</div>
+      <div class="stat-label">Avg end-to-end (ms)</div>
+    </div>
   </section>
 
-  <section class="chart-wrap">
-    <canvas id="tpsChart" height="80"></canvas>
-  </section>
+  <div class="charts-row">
+    <section class="chart-wrap">
+      <h2>Overall TPS</h2>
+      <canvas id="tpsChart"></canvas>
+    </section>
+
+    <section class="chart-wrap">
+      <h2>Approved vs declined (% of last 5s)</h2>
+      <canvas id="outcomeChart"></canvas>
+    </section>
+  </div>
 
   <section class="feed-wrap">
     <h2>Live transaction feed</h2>
@@ -43,14 +60,14 @@
       <thead>
         <tr>
           <th>Time</th><th>Merchant</th><th>Terminal</th><th>Network</th>
-          <th>Amount</th><th>Status</th><th>Response</th>
+          <th>Amount</th><th>Status</th><th>Response</th><th>Duration</th>
         </tr>
       </thead>
       <tbody id="feedBody"></tbody>
     </table>
   </section>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+  <script src="/static/vendor/chart.umd.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -17,6 +17,7 @@ dashboard's pause/resume/rate-multiplier state.
 import asyncio
 import os
 import random
+import signal
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 import httpx
 
 from services.common import iso8583
+from services.common.control import ControlPoller
 from services.common.crypto import iso4_encode_pin_block, key_from_hex
 from services.common.util import load_json, setup_logging, wait_for_files
 
@@ -44,22 +46,8 @@ TARGET_TPS = float(os.environ.get("TARGET_TPS", "20"))
 PIN_TYPO_PROBABILITY = 0.03
 
 _http = httpx.AsyncClient(timeout=2.0)
-_control_cache = {"paused": False, "rate_multiplier": 1.0}
-_control_cache_at = 0.0
-
-
-async def get_control_state():
-    global _control_cache_at
-    loop = asyncio.get_event_loop()
-    if loop.time() - _control_cache_at < 2.0:
-        return _control_cache
-    try:
-        resp = await _http.get(f"{DASHBOARD_URL}/api/control")
-        _control_cache.update(resp.json())
-    except Exception as exc:
-        log.debug("control fetch failed, keeping last known state: %s", exc)
-    _control_cache_at = loop.time()
-    return _control_cache
+_control = ControlPoller(_http, DASHBOARD_URL)
+_stop_event = asyncio.Event()  # set on SIGTERM/SIGINT: stop *originating* new sends
 
 
 def maybe_typo(pin: str) -> str:
@@ -121,31 +109,69 @@ async def send_transaction(values: dict):
             pass
 
 
+_BACKGROUND_TASKS: set = set()
+
+
+async def send_one(merchant_id: str, template: dict, terminal_key, customer_pins: dict):
+    """Runs as its own background task, independent of the merchant's
+    send-pacing loop below -- if the gateway/issuer are slow to respond
+    (e.g. the issuer is paused, see services/dashboard/app.py), this
+    transaction just sits waiting for its response without blocking the
+    merchant from originating further ones, which is what lets
+    outstanding authorizations actually pile up rather than capping out
+    at one per merchant."""
+    try:
+        await asyncio.sleep(random.uniform(0.01, 0.1))  # terminal processing time
+        values = build_live_message(template, terminal_key, customer_pins)
+        await send_transaction(values)
+    except Exception as exc:
+        # a single bad/dropped/stuck transaction must never take down
+        # this merchant's task, let alone the whole asyncio.gather() below
+        log.warning("dropping one transaction for %s: %s", merchant_id, exc)
+
+
+async def _sleep_or_stop(seconds: float) -> bool:
+    """Sleeps up to `seconds`, but returns early (True) the moment shutdown
+    is signalled, so a shutdown doesn't have to wait out a merchant's full
+    next-send delay -- some of these can be many seconds at low TPS."""
+    try:
+        await asyncio.wait_for(_stop_event.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: dict, customer_pins: dict):
-    await asyncio.sleep(random.uniform(0, 10))
+    if await _sleep_or_stop(random.uniform(0, 10)):
+        return
     log.info("merchant %s starting, base rate %.3f tx/s over %d templates", merchant_id, lam, len(pool))
-    while True:
-        control = await get_control_state()
-        if control.get("paused"):
-            await asyncio.sleep(1.0)
+    while not _stop_event.is_set():
+        control = await _control.get()
+        if control.get("merchant_paused"):
+            if await _sleep_or_stop(1.0):
+                break
             continue
 
         effective_lam = max(lam * control.get("rate_multiplier", 1.0), 0.001)
-        await asyncio.sleep(random.expovariate(effective_lam))
+        if await _sleep_or_stop(random.expovariate(effective_lam)):
+            break
 
         template = random.choice(pool)
         terminal_key = terminal_keys.get(template["terminal_id"])
         if terminal_key is None:
             continue
 
-        await asyncio.sleep(random.uniform(0.01, 0.1))  # terminal processing time
-        try:
-            values = build_live_message(template, terminal_key, customer_pins)
-            await send_transaction(values)
-        except Exception as exc:
-            # a single bad/dropped transaction must never take down this
-            # merchant's task, let alone the whole asyncio.gather() below
-            log.warning("dropping one transaction for %s: %s", merchant_id, exc)
+        # asyncio only holds a *weak* reference to a task -- one that
+        # isn't referenced anywhere else can be garbage-collected mid-flight,
+        # which silently cancels it and (via send_transaction's finally)
+        # closes its gateway connection early. That looked exactly like a
+        # burst of dropped/failed transactions under normal load, not just
+        # under a paused issuer, until traced to this. Keeping a strong
+        # reference in _BACKGROUND_TASKS (discarded once the task finishes)
+        # is the standard fix.
+        task = asyncio.create_task(send_one(merchant_id, template, terminal_key, customer_pins))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def main():
@@ -172,11 +198,23 @@ async def main():
         merchant_ids.append(m["merchant_id"])
         tasks.append(run_merchant(m["merchant_id"], pool, lam, terminal_keys, customer_pins))
 
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _stop_event.set)
+
     log.info("simulating %d merchants, target %.1f tx/s combined", len(tasks), TARGET_TPS)
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for merchant_id, result in zip(merchant_ids, results):
         if isinstance(result, Exception):
             log.error("merchant task for %s died: %s", merchant_id, result)
+
+    if _stop_event.is_set() and _BACKGROUND_TASKS:
+        log.info("no longer originating new authorizations, waiting on %d in-flight one(s)...",
+                  len(_BACKGROUND_TASKS))
+        _done, pending = await asyncio.wait(list(_BACKGROUND_TASKS), timeout=25)
+        if pending:
+            log.warning("%d in-flight transaction(s) still running after 25s, exiting anyway", len(pending))
+    log.info("shutdown complete")
 
 
 if __name__ == "__main__":

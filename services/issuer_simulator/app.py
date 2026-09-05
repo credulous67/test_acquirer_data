@@ -11,15 +11,26 @@ two verification styles real issuers use, the other being PVV-based
 verification which needs a PIN Verification Key this project doesn't
 model), checks the card hasn't expired, and otherwise picks a response
 code from the same weighted distribution the old static generator used.
+
+Pausing the issuer (via the dashboard) does not refuse or drop
+connections -- it holds each one open, past its normal random processing
+delay, until resumed. That models an issuer that's up but unresponsive
+at the message level rather than a network-level outage, so it
+deliberately does not trigger the acquirer's Stand-In Processing (STIP)
+path a real "issuer unreachable" condition would; the visible effect is
+authorizations piling up at the gateway with no response.
 """
 import asyncio
 import os
 import random
 from datetime import datetime, timezone
 
+import httpx
+
 from services.common import iso8583, reference
+from services.common.control import ControlPoller
 from services.common.crypto import iso4_decode_pin_block, key_from_hex
-from services.common.util import load_json, setup_logging, wait_for_files
+from services.common.util import load_json, serve_until_signal, setup_logging, wait_for_files
 
 log = setup_logging("issuer-simulator")
 
@@ -29,9 +40,12 @@ KEYS_PATH = os.path.join(SEED_DIR, "keys", "keys.json")
 
 ISSUER_HOST = os.environ.get("ISSUER_HOST", "0.0.0.0")
 ISSUER_PORT = int(os.environ.get("ISSUER_PORT", "8584"))
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 
 CARDS_BY_PAN = {}
 ISSUER_KEYS = {}
+_http = httpx.AsyncClient(timeout=2.0)
+_control = ControlPoller(_http, DASHBOARD_URL)
 
 
 def is_expired(expiry_yymm: str) -> bool:
@@ -78,6 +92,9 @@ async def handle_gateway(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         writer.close()
         return
 
+    while (await _control.get()).get("issuer_paused"):
+        await asyncio.sleep(1.0)
+
     # simulated issuer host processing time, with an occasional slow one
     delay = random.uniform(0.1, 0.8)
     if random.random() < 0.05:
@@ -112,8 +129,12 @@ async def main():
 
     server = await asyncio.start_server(handle_gateway, ISSUER_HOST, ISSUER_PORT)
     log.info("issuer-simulator listening on %s:%s", ISSUER_HOST, ISSUER_PORT)
-    async with server:
-        await server.serve_forever()
+    # Note: if issuer_paused is set when a shutdown signal arrives, any
+    # in-flight connections are blocked in decide_response()'s pause-wait
+    # loop and won't drain within the grace period -- that's expected
+    # (they're being held open on purpose) and scripts/graceful_shutdown.sh
+    # accounts for it with its own timeout rather than waiting forever.
+    await serve_until_signal(server, log)
 
 
 if __name__ == "__main__":

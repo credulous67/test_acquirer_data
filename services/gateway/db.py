@@ -14,6 +14,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Integer,
     MetaData,
     Numeric,
     String,
@@ -54,6 +55,7 @@ authorizations = Table(
     Column("forwarded_at", DateTime(timezone=True)),
     Column("response_received_at", DateTime(timezone=True)),
     Column("completed_at", DateTime(timezone=True)),
+    Column("duration_ms", Integer),  # end-to-end: received_at -> completed_at
 )
 
 _engine = None
@@ -62,7 +64,13 @@ _engine = None
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+        # Pausing the issuer deliberately builds up a large backlog of
+        # outstanding authorizations (see services/dashboard/app.py); when
+        # it's resumed, all of them complete in a short burst. A small
+        # default pool (5) queues or drops connections under that burst,
+        # so both the pool and the overflow allowance are sized well past
+        # normal steady-state load to absorb it.
+        _engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=60)
     return _engine
 
 

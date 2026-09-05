@@ -7,6 +7,7 @@
   --muted: #9aa7c2;
   --approved: #35c98f;
   --declined: #f2555a;
+  --outstanding: #e8a33d;
   --accent: #5b8def;
 }
 
@@ -62,15 +63,40 @@ button.paused { background: var(--declined); }
 }
 .stat-card.approved .stat-value { color: var(--approved); }
 .stat-card.declined .stat-value { color: var(--declined); }
+.stat-card.outstanding .stat-value { color: var(--outstanding); }
 .stat-value { font-size: 1.8rem; font-weight: 700; }
 .stat-label { color: var(--muted); font-size: 0.8rem; margin-top: 0.25rem; }
+
+.charts-row {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
 
 .chart-wrap, .feed-wrap {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1rem;
-  margin-bottom: 1.5rem;
+}
+
+.feed-wrap { margin-bottom: 1.5rem; }
+
+.charts-row .chart-wrap {
+  flex: 1;
+  min-width: 0;
+  height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.charts-row .chart-wrap canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 800px) {
+  .charts-row { flex-direction: column; }
 }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
