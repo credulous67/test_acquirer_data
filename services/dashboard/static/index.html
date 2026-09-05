@@ -52,6 +52,11 @@
       <h2>Approved vs declined (% of last 5s)</h2>
       <canvas id="outcomeChart"></canvas>
     </section>
+
+    <section class="chart-wrap">
+      <h2>Auth type (% of last 5s)</h2>
+      <canvas id="authTypeChart"></canvas>
+    </section>
   </div>
 
   <section class="feed-wrap">
@@ -60,7 +65,7 @@
       <thead>
         <tr>
           <th>Time</th><th>Merchant</th><th>Terminal</th><th>Network</th>
-          <th>Amount</th><th>Status</th><th>Response</th><th>Duration</th>
+          <th>Auth Type</th><th>Amount</th><th>Status</th><th>Response</th><th>Duration</th>
         </tr>
       </thead>
       <tbody id="feedBody"></tbody>

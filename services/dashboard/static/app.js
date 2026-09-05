@@ -28,8 +28,18 @@ const X_AXIS = {
   grid: { color: "rgba(154,167,194,0.1)" },
 };
 
+// Must match services/common/reference.AUTH_TYPE_ORDER (label text) exactly.
+const AUTH_TYPES = [
+  { label: "EMV", color: "#5b8def", fill: "rgba(91,141,239,0.55)" },
+  { label: "Contactless", color: "#a78bfa", fill: "rgba(167,139,250,0.55)" },
+  { label: "Magstripe", color: "#eab308", fill: "rgba(234,179,8,0.55)" },
+  { label: "CNP (eCom)", color: "#38bdf8", fill: "rgba(56,189,248,0.55)" },
+  { label: "CNP (MOTO)", color: "#fb7185", fill: "rgba(251,113,133,0.55)" },
+];
+
 let tpsChart = null;
 let outcomeChart = null;
+let authTypeChart = null;
 if (typeof Chart !== "undefined") {
   tpsChart = new Chart(document.getElementById("tpsChart"), {
     type: "line",
@@ -100,6 +110,38 @@ if (typeof Chart !== "undefined") {
       plugins: { legend: { display: true, labels: { color: "#9aa7c2" } } },
     },
   });
+
+  authTypeChart = new Chart(document.getElementById("authTypeChart"), {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: AUTH_TYPES.map((t) => ({
+        label: t.label,
+        data: [],
+        borderColor: t.color,
+        backgroundColor: t.fill,
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        stack: "pct",
+      })),
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: X_AXIS,
+        y: {
+          stacked: true,
+          min: 0,
+          max: 100,
+          ticks: { color: "#9aa7c2", callback: (v) => `${v}%` },
+        },
+      },
+      plugins: { legend: { display: true, labels: { color: "#9aa7c2" } } },
+    },
+  });
 } else {
   console.warn("Chart.js (static/vendor/chart.umd.min.js) failed to load -- charts disabled, other stats still live.");
   document.querySelectorAll(".chart-wrap").forEach((el) => {
@@ -127,7 +169,7 @@ function applyStats(stats) {
   outstandingValue.textContent = stats.outstanding ?? 0;
   latencyValue.textContent = Math.round(stats.avg_latency_ms ?? 0);
 
-  if (!tpsChart || !outcomeChart) return;
+  if (!tpsChart || !outcomeChart || !authTypeChart) return;
   const label = new Date().toLocaleTimeString();
 
   tpsChart.data.labels.push(label);
@@ -147,6 +189,17 @@ function applyStats(stats) {
     outcomeChart.data.datasets[1].data.shift();
   }
   outcomeChart.update();
+
+  authTypeChart.data.labels.push(label);
+  const authTypePct = stats.auth_type_pct ?? {};
+  AUTH_TYPES.forEach((t, i) => {
+    authTypeChart.data.datasets[i].data.push(authTypePct[t.label] ?? 0);
+  });
+  if (authTypeChart.data.labels.length > MAX_POINTS) {
+    authTypeChart.data.labels.shift();
+    authTypeChart.data.datasets.forEach((ds) => ds.data.shift());
+  }
+  authTypeChart.update();
 }
 
 function addFeedRow(event) {
@@ -159,6 +212,7 @@ function addFeedRow(event) {
     <td>${event.merchant_id ?? ""}</td>
     <td>${event.terminal_id ?? ""}</td>
     <td>${event.card_network ?? ""}</td>
+    <td>${event.auth_type ?? ""}</td>
     <td>${event.currency ?? ""} ${((event.amount ?? 0) / 100).toFixed(2)}</td>
     <td class="${approved ? "approved" : "declined"}">${event.response_status ?? ""}</td>
     <td>${event.response_code ?? ""}</td>

@@ -98,11 +98,13 @@ async def handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWr
             })
         except Exception:
             pass
+        fallback_pos_entry_mode = iso8583.POS_ENTRY_MODE_NAMES.get(req.get("pos_entry_mode"), req.get("pos_entry_mode"))
         await report_event(
             "completed", transaction_id=txn_id, merchant_id=req.get("merchant_id"),
             terminal_id=req.get("terminal_id"), card_network=extra.get("card_network"),
             amount=str(req.get("amount_minor_units", "0")), currency=extra.get("currency_code_alpha"),
             response_code="96", response_status="DECLINED", duration_ms=duration_ms,
+            auth_type=reference.AUTH_TYPE_LABELS.get(fallback_pos_entry_mode, fallback_pos_entry_mode),
         )
         try:
             await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
@@ -123,6 +125,8 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
     card_network = extra.get("card_network")
     issuer_id = reference.issuer_id_for_network(card_network)
     pin_present = bool(extra.get("pin_present"))
+    pos_entry_mode = iso8583.POS_ENTRY_MODE_NAMES.get(req.get("pos_entry_mode"), req.get("pos_entry_mode"))
+    auth_type = reference.AUTH_TYPE_LABELS.get(pos_entry_mode, pos_entry_mode)
 
     # simulated gateway ingest/validation processing time
     await asyncio.sleep(random.uniform(0.02, 0.15))
@@ -140,7 +144,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
         "currency_code_numeric": req["currency_code_numeric"],
         "currency_code_alpha": extra.get("currency_code_alpha"),
         "mcc": req.get("mcc"),
-        "pos_entry_mode": iso8583.POS_ENTRY_MODE_NAMES.get(req.get("pos_entry_mode"), req.get("pos_entry_mode")),
+        "pos_entry_mode": pos_entry_mode,
         "pin_present": pin_present,
         "stan": req.get("stan"),
         "retrieval_reference_number": req.get("retrieval_reference_number"),
@@ -194,7 +198,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
         terminal_id=req["terminal_id"], card_network=card_network,
         amount=str(req["amount_minor_units"]), currency=extra.get("currency_code_alpha"),
         response_code=response_code, response_status=response_status,
-        duration_ms=duration_ms,
+        duration_ms=duration_ms, auth_type=auth_type,
     )
 
     await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {

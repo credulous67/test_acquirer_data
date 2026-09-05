@@ -27,6 +27,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from services.common import reference
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,6 +47,7 @@ RECENT_EVENTS = deque(maxlen=500)
 COMPLETED_TIMESTAMPS = deque(maxlen=5000)  # for a rolling TPS window
 APPROVED_TIMESTAMPS = deque(maxlen=5000)  # same, split by outcome -- for the stacked chart
 DECLINED_TIMESTAMPS = deque(maxlen=5000)
+AUTH_TYPE_TIMESTAMPS = {label: deque(maxlen=5000) for label in reference.AUTH_TYPE_ORDER}  # split by auth type
 DURATIONS_MS = deque(maxlen=5000)  # end-to-end (received -> completed) latency
 COUNTS = {"approved": 0, "declined": 0}
 OUTSTANDING = 0  # received but not yet completed -- what "piles up" when the issuer is paused
@@ -73,6 +76,17 @@ def current_stats():
     # lifetime cumulative and would look like a flat, barely-moving line
     window_approve_pct = (window_approved / window_total * 100) if window_total else 0.0
     window_decline_pct = (window_declined / window_total * 100) if window_total else 0.0
+
+    # windowed (last 5s) auth-type split, for the third stacked-to-100% chart
+    auth_type_window_counts = {
+        label: len([t for t in dq if now - t <= window]) for label, dq in AUTH_TYPE_TIMESTAMPS.items()
+    }
+    auth_type_total = sum(auth_type_window_counts.values())
+    auth_type_pct = {
+        label: round((count / auth_type_total * 100) if auth_type_total else 0.0, 1)
+        for label, count in auth_type_window_counts.items()
+    }
+
     total = COUNTS["approved"] + COUNTS["declined"]
     approve_pct = (COUNTS["approved"] / total * 100) if total else 0.0
     decline_pct = (COUNTS["declined"] / total * 100) if total else 0.0
@@ -84,6 +98,7 @@ def current_stats():
         "tps_declined": round(tps_declined, 2),
         "window_approve_pct": round(window_approve_pct, 1),
         "window_decline_pct": round(window_decline_pct, 1),
+        "auth_type_pct": auth_type_pct,
         "approved": COUNTS["approved"],
         "declined": COUNTS["declined"],
         "approve_pct": round(approve_pct, 1),
@@ -123,6 +138,9 @@ async def post_event(request: Request):
         else:
             COUNTS["declined"] += 1
             DECLINED_TIMESTAMPS.append(time.time())
+        auth_type_dq = AUTH_TYPE_TIMESTAMPS.get(event.get("auth_type"))
+        if auth_type_dq is not None:
+            auth_type_dq.append(time.time())
 
     await broadcast({"type": "event", **event})
     return {"ok": True}

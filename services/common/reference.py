@@ -125,4 +125,16 @@ POS_ENTRY_MODES = ["CHIP", "CHIP", "CONTACTLESS", "CONTACTLESS", "SWIPE", "ECOM"
 PIN_CAPABLE_ENTRY_MODES = {"CHIP", "SWIPE", "CONTACTLESS"}
 PIN_PRESENT_PROBABILITY = {"CHIP": 0.5, "SWIPE": 0.5, "CONTACTLESS": 0.15}
 
+# human-facing auth type labels, keyed by the same entry-mode names used
+# throughout (iso8583.POS_ENTRY_MODE_NAMES) -- single source of truth for
+# the dashboard's feed column and auth-type breakdown chart
+AUTH_TYPE_LABELS = {
+    "CHIP": "EMV",
+    "CONTACTLESS": "Contactless",
+    "SWIPE": "Magstripe",
+    "ECOM": "CNP (eCom)",
+    "MANUAL": "CNP (MOTO)",
+}
+AUTH_TYPE_ORDER = ["EMV", "Contactless", "Magstripe", "CNP (eCom)", "CNP (MOTO)"]
+
 ACQUIRER_ID = "ACQ-TESTPOC-001"

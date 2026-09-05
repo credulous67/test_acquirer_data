@@ -46,27 +46,23 @@ software with no HSM hardware:
 
 ## Architecture
 
-```
-                     jittered per-merchant           random gateway            random issuer
-                     start + send timing              processing delay          processing delay
-┌─────────────────┐        ISO 8583        ┌──────────────────┐    ISO 8583    ┌───────────────────┐
-│ merchant-        │ ───── auth request ──▶│ acquirer-gateway  │ ── forward ──▶ │ issuer-simulator   │
-│ simulator        │                        │                   │                │ (all issuers, one  │
-│ (all merchants,  │◀──── auth response ────│  translates PIN   │◀── response ───│  container)        │
-│  one container)  │       (mutated by       │  block: terminal  │   (mutated:                        │
-└─────────────────┘        the issuer)      │  ZPK → issuer ZPK │    response code,                   │
-                                              │  persists to DB   │    auth code)                       │
-                                              └─────────┬─────────┘                                      │
-                                                         │ INSERT / UPDATE                                │
-                                                         ▼                                                │
-                                              ┌──────────────────┐        lifecycle events (best-effort)  │
-                                              │   PostgreSQL      │        ┌──────────────────────────────┘
-                                              │  (swappable, see  │        ▼
-                                              │  below)            │  ┌───────────────┐   WebSocket   ┌────────────┐
-                                              └──────────────────┘  │  dashboard     │──────────────▶│  browser   │
-                                                                     │ (stats, pause/ │◀── pause/resume/rate ──────┘
-                                                                     │  resume, rate) │
-                                                                     └───────────────┘
+```mermaid
+flowchart LR
+    M["<b>merchant-simulator</b><br/>all merchants, one container<br/><i>jittered per-merchant start + send timing</i>"]
+    G["<b>acquirer-gateway</b><br/><i>random processing delay</i><br/>translates PIN block:<br/>terminal ZPK → issuer ZPK<br/>persists to DB"]
+    I["<b>issuer-simulator</b><br/>all issuers, one container<br/><i>random processing delay</i>"]
+    DB[("PostgreSQL<br/>swappable, see below")]
+    D["<b>dashboard</b><br/>stats, pause/resume, rate"]
+    B["browser"]
+
+    M -- "ISO 8583 auth request" --> G
+    G -- "forward (ISO 8583)" --> I
+    I -- "response (mutated:<br/>response code, auth code)" --> G
+    G -- "auth response<br/>(mutated by issuer)" --> M
+    G -- "INSERT / UPDATE" --> DB
+    G -. "lifecycle events (best-effort)" .-> D
+    D -- "WebSocket" --> B
+    B -. "pause / resume / rate" .-> D
 ```
 
 The gateway is the only component that sees every hop of a transaction,
@@ -209,14 +205,18 @@ ISO 8583 host-to-host links use.
   and the **average end-to-end latency** (`received_at` → `completed_at`,
   recorded per transaction as `duration_ms` on the gateway's
   `authorizations` row and in its "completed" dashboard event).
-- Two side-by-side charts, both a 30-minute rolling window (one point/sec):
-  **Overall TPS** (a single line), and **Approved vs declined** — a
-  stacked area chart of each side's *share* of the last 5 seconds, always
-  summing to 100% (this is a different, windowed number from the
-  lifetime approve/decline percentages in the stat cards above, which
-  barely move once there's been a lot of traffic).
+- Three side-by-side charts, all a 30-minute rolling window (one point/sec):
+  **Overall TPS** (a single line); **Approved vs declined**; and
+  **Auth type** — both of the latter are stacked area charts of each
+  category's *share* of the last 5 seconds, always summing to 100% (a
+  different, windowed number from the lifetime approve/decline
+  percentages in the stat cards above, which barely move once there's
+  been a lot of traffic). Auth type is derived from the ISO 8583 POS
+  entry mode (`services/common/reference.AUTH_TYPE_LABELS`): EMV (chip),
+  Contactless, Magstripe (swipe), and two card-not-present flavours,
+  CNP (eCom) and CNP (MOTO).
 - A live-scrolling feed of completed transactions, including each one's
-  end-to-end duration.
+  auth type and end-to-end duration.
 - **Pause merchant / Pause issuer** — independent controls:
   - *Pause merchant* stops the merchant-simulator from originating *new*
     transactions; already-sent ones complete normally.
@@ -236,9 +236,9 @@ ISO 8583 host-to-host links use.
 Chart.js is vendored locally (`services/dashboard/static/vendor/`), not
 loaded from a CDN — the browser only ever talks to the dashboard
 container, so this works with no outbound internet access at all. If
-that file were ever missing (e.g. an image build that dropped it), both
-chart panels show a message instead, but the stat cards, the feed, and
-pause/resume/rate all keep working regardless.
+that file were ever missing (e.g. an image build that dropped it), all
+three chart panels show a message instead, but the stat cards, the feed,
+and pause/resume/rate all keep working regardless.
 
 ## Shutting down and resuming cleanly
 
