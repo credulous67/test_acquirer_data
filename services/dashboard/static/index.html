@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Acquiring Simulation Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Merchant &rarr; Gateway &rarr; Issuer: live authorization flow</h1>
+    <div class="controls">
+      <button id="pauseBtn">Pause</button>
+      <label>
+        Rate
+        <input type="range" id="rateSlider" min="0.1" max="10" step="0.1" value="1">
+        <span id="rateLabel">1.0x</span>
+      </label>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat-card">
+      <div class="stat-value" id="tpsValue">0.0</div>
+      <div class="stat-label">TPS (5s window)</div>
+    </div>
+    <div class="stat-card approved">
+      <div class="stat-value" id="approvedValue">0</div>
+      <div class="stat-label">Approved (<span id="approvedPct">0</span>%)</div>
+    </div>
+    <div class="stat-card declined">
+      <div class="stat-value" id="declinedValue">0</div>
+      <div class="stat-label">Declined (<span id="declinedPct">0</span>%)</div>
+    </div>
+  </section>
+
+  <section class="chart-wrap">
+    <canvas id="tpsChart" height="80"></canvas>
+  </section>
+
+  <section class="feed-wrap">
+    <h2>Live transaction feed</h2>
+    <table id="feedTable">
+      <thead>
+        <tr>
+          <th>Time</th><th>Merchant</th><th>Terminal</th><th>Network</th>
+          <th>Amount</th><th>Status</th><th>Response</th>
+        </tr>
+      </thead>
+      <tbody id="feedBody"></tbody>
+    </table>
+  </section>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

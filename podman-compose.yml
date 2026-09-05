@@ -1,0 +1,94 @@
+version: "3.9"
+
+# Merchant -> acquirer gateway -> issuer live ISO 8583 simulation.
+# See README.md for architecture, the PIN/ZPK model, and how to swap
+# postgres for another RDBMS.
+#
+# Run with: podman-compose up --build
+# (docker compose up --build also works against this same file)
+
+services:
+  seed-generator:
+    build:
+      context: .
+      dockerfile: services/seed_generator/Dockerfile
+    volumes:
+      - seed-data:/data
+    restart: "no"
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: payments
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    depends_on:
+      seed-generator:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    volumes:
+      - seed-data:/data:ro
+    environment:
+      SEED_DIR: /data
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/payments
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8583"
+      ISSUER_HOST: issuer-simulator
+      ISSUER_PORT: "8584"
+      DASHBOARD_URL: http://dashboard:8080
+
+  issuer-simulator:
+    build:
+      context: .
+      dockerfile: services/issuer_simulator/Dockerfile
+    depends_on:
+      seed-generator:
+        condition: service_completed_successfully
+    volumes:
+      - seed-data:/data:ro
+    environment:
+      SEED_DIR: /data
+      ISSUER_HOST: 0.0.0.0
+      ISSUER_PORT: "8584"
+
+  merchant-simulator:
+    build:
+      context: .
+      dockerfile: services/merchant_simulator/Dockerfile
+    depends_on:
+      seed-generator:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+    volumes:
+      - seed-data:/data:ro
+    environment:
+      SEED_DIR: /data
+      GATEWAY_HOST: gateway
+      GATEWAY_PORT: "8583"
+      DASHBOARD_URL: http://dashboard:8080
+      TARGET_TPS: "20"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    ports:
+      - "8080:8080"
+
+volumes:
+  seed-data:
+  pgdata:

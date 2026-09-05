@@ -17,7 +17,10 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Run generator (small volume smoke test)
+      - name: Install test dependencies
+        run: pip install pytest cryptography
+
+      - name: Run seed generator (small volume smoke test)
         run: |
           python3 scripts/generate_data.py --out data \
             --merchants 5 --cards 50 --authorizations 100 --days-back 7
@@ -34,7 +37,7 @@ jobs:
       - name: Validate PANs are Luhn-valid
         run: |
           python3 - <<'EOF'
-          import csv
+          import json
 
           def luhn_ok(num):
               digits = [int(d) for d in num]
@@ -48,15 +51,41 @@ jobs:
                   total += d
               return total % 10 == 0
 
-          bad = 0
-          n = 0
-          with open("data/db/csv/cards.csv") as f:
-              for row in csv.DictReader(f):
-                  n += 1
-                  if not luhn_ok(row["pan"]):
-                      bad += 1
+          with open("data/seed/cards.json") as f:
+              cards = json.load(f)
 
-          print(f"{n} PANs checked, {bad} invalid")
-          assert n > 0, "no PANs were generated"
+          bad = sum(1 for c in cards if not luhn_ok(c["pan"]))
+          print(f"{len(cards)} PANs checked, {bad} invalid")
+          assert len(cards) > 0, "no PANs were generated"
           assert bad == 0, f"{bad} PAN(s) failed Luhn validation"
           EOF
+
+      - name: Validate at-rest PIN blocks decrypt to a real PIN
+        run: |
+          python3 - <<'EOF'
+          import json
+          import sys
+
+          sys.path.insert(0, ".")
+          from services.common.crypto import iso4_decode_pin_block, key_from_hex
+
+          cards = json.load(open("data/seed/cards.json"))
+          keys = json.load(open("data/keys/keys.json"))
+
+          bad = 0
+          for c in cards:
+              zpk = key_from_hex(keys["issuers"][c["issuer_id"]])
+              block = bytes.fromhex(c["pin_block_at_rest_hex"])
+              try:
+                  pin = iso4_decode_pin_block(block, c["pan"], zpk)
+              except ValueError:
+                  pin = None
+              if not pin or not pin.isdigit():
+                  bad += 1
+
+          print(f"{len(cards)} at-rest PIN blocks checked, {bad} failed to decode")
+          assert bad == 0, f"{bad} card(s) have an unreadable at-rest PIN block"
+          EOF
+
+      - name: Unit tests (ISO 8583 codec + PIN block crypto)
+        run: python3 -m pytest services/common/ -q

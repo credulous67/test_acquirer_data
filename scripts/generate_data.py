@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """
-Synthetic merchant-acquiring payment data generator for encryption POC testing
-of application-level field encryption, gateway/API tokenization, and
-transparent file/directory encryption, regardless of vendor.
+Seed/reference data generator for the live merchant-acquirer authorization
+simulation (see README.md and podman-compose.yml).
+
+This script does NOT populate a database and does NOT decide any
+authorization outcomes -- both of those now happen live, at run time, in
+the gateway and issuer-simulator services. All this script produces is:
+
+  - static reference data merchants/terminals/cards need (merchants,
+    terminals, the card "vault", generic MCC/currency/response-code/BIN
+    reference tables) -- data/seed/*.json and data/reference/*
+  - a pool of authorization *request* templates the merchant-simulator
+    replays as live traffic -- data/seed/authorizations.json
+  - the AES keys (ZPKs) used to encipher PIN blocks in transit --
+    data/keys/keys.json
+  - a TEST-ONLY oracle of what each simulated cardholder types at the PIN
+    pad -- data/seed/customer_pins.json
 
 ALL data produced by this script is fake:
   - PANs are built from publicly-documented test/sandbox BIN prefixes
@@ -10,38 +23,30 @@ ALL data produced by this script is fake:
     publish for sandbox use) with randomised trailing digits and a
     correctly computed Luhn check digit. They are structurally valid
     but are NOT real, issued account numbers.
-  - Names, addresses, merchants, CVVs and track data are randomly
+  - Names, addresses, merchants, CVVs, PINs and track data are randomly
     generated and do not correspond to real people or businesses.
 
-Output layout (under --out, default ./data):
-  db/schema.sql              DDL for merchants/terminals/cards/authorizations
-  db/payments.db             populated SQLite database (ready to query)
-  db/csv/*.csv               same tables as CSV, for bulk-load into any RDBMS
-  structured/json/authorizations/<merchant_id>/<yyyy-mm-dd>/<txn_id>.json
-                              one authorization per file (good for file/
-                              directory-level transparent encryption tests)
-  structured/json/authorizations_all.json
-  structured/xml/authorizations.xml
-  reference/*                generic, non-card payment reference data
-                              (MCC codes, currency codes, response codes,
-                              BIN range table, card network facts)
-  reference/merchants/<merchant_id>/profile.json + terminals.csv
-                              non-sensitive merchant metadata, split out
-                              from the cardholder-data tables on purpose
+Two outputs deliberately model something that would be a serious security
+violation in a real system, and both are called out again in README.md:
+  - data/keys/keys.json holds AES ZPKs in the clear. A real ZPK only ever
+    exists inside an HSM boundary.
+  - data/seed/customer_pins.json is a test oracle standing in for "what
+    the fake cardholder types at the PIN pad" (keyed by PAN, the only
+    thing a terminal actually has). A real merchant/terminal has no such
+    file.
 """
 import argparse
-import csv
 import json
 import os
 import random
-import sqlite3
+import sys
 import uuid
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
-# --------------------------------------------------------------------------
-# Reference data
-# --------------------------------------------------------------------------
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from services.common import reference
+from services.common.crypto import generate_aes_key, iso4_encode_pin_block, key_to_hex
 
 FIRST_NAMES = [
     "James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda",
@@ -66,96 +71,6 @@ MERCHANT_NAMES = [
     "Union Square Florist", "Bayside Seafood Market", "Redwood Auto Parts", "Emerald City Toys",
     "Prairie Wind Farm Stand",
 ]
-
-MCC_TABLE = [
-    ("5411", "Grocery Stores, Supermarkets"),
-    ("5732", "Electronics Stores"),
-    ("5812", "Eating Places, Restaurants"),
-    ("5251", "Hardware Stores"),
-    ("5651", "Family Clothing Stores"),
-    ("5541", "Service Stations (Fuel)"),
-    ("5942", "Book Stores"),
-    ("5511", "Car and Truck Dealers"),
-    ("5912", "Drug Stores and Pharmacies"),
-    ("4111", "Local/Suburban Commuter Transport"),
-    ("7832", "Motion Picture Theaters"),
-    ("7011", "Hotels, Motels, Resorts"),
-    ("5462", "Bakeries"),
-    ("4814", "Telecommunication Services"),
-    ("5813", "Bars, Cocktail Lounges"),
-    ("5499", "Convenience Stores"),
-    ("5712", "Furniture, Home Furnishings"),
-    ("7230", "Beauty and Barber Shops"),
-    ("5941", "Sporting Goods Stores"),
-    ("5995", "Pet Shops, Pet Supplies"),
-    ("5992", "Florists"),
-    ("5422", "Freezer/Meat/Fish Markets"),
-    ("5533", "Auto Parts and Accessories"),
-    ("5945", "Hobby, Toy and Game Shops"),
-    ("5431", "Farm/Roadside Produce Stands"),
-]
-
-CURRENCIES = [
-    ("840", "USD", 2, "US Dollar"),
-    ("978", "EUR", 2, "Euro"),
-    ("826", "GBP", 2, "Pound Sterling"),
-    ("124", "CAD", 2, "Canadian Dollar"),
-    ("036", "AUD", 2, "Australian Dollar"),
-    ("392", "JPY", 0, "Japanese Yen"),
-    ("756", "CHF", 2, "Swiss Franc"),
-    ("710", "ZAR", 2, "South African Rand"),
-    ("356", "INR", 2, "Indian Rupee"),
-    ("484", "MXN", 2, "Mexican Peso"),
-    ("986", "BRL", 2, "Brazilian Real"),
-    ("702", "SGD", 2, "Singapore Dollar"),
-]
-
-RESPONSE_CODES = [
-    ("00", "Approved", "APPROVED"),
-    ("01", "Refer to card issuer", "DECLINED"),
-    ("04", "Pick up card", "DECLINED"),
-    ("05", "Do not honor", "DECLINED"),
-    ("12", "Invalid transaction", "DECLINED"),
-    ("14", "Invalid card number", "DECLINED"),
-    ("30", "Format error", "DECLINED"),
-    ("41", "Lost card", "DECLINED"),
-    ("43", "Stolen card", "DECLINED"),
-    ("51", "Insufficient funds", "DECLINED"),
-    ("54", "Expired card", "DECLINED"),
-    ("57", "Transaction not permitted to cardholder", "DECLINED"),
-    ("58", "Transaction not permitted to terminal", "DECLINED"),
-    ("61", "Exceeds withdrawal amount limit", "DECLINED"),
-    ("62", "Restricted card", "DECLINED"),
-    ("65", "Exceeds withdrawal frequency limit", "DECLINED"),
-    ("75", "PIN tries exceeded", "DECLINED"),
-    ("91", "Issuer or switch inoperative", "DECLINED"),
-    ("96", "System malfunction", "DECLINED"),
-]
-# weighted toward approvals, like a real portfolio
-RESPONSE_WEIGHTS = [70] + [30 / (len(RESPONSE_CODES) - 1)] * (len(RESPONSE_CODES) - 1)
-
-TXN_TYPES = ["PURCHASE", "PURCHASE", "PURCHASE", "PURCHASE", "REFUND", "PREAUTH", "VOID"]
-POS_ENTRY_MODES = ["CHIP", "CHIP", "CONTACTLESS", "CONTACTLESS", "SWIPE", "ECOM", "MANUAL"]
-
-# Card network test/sandbox BIN prefixes -- these are the same style of
-# publicly-documented, non-issued ranges used by processor sandboxes
-# (e.g. Stripe/Braintree test cards). Marked TEST in bin_ranges.json.
-NETWORKS = [
-    # name, prefix, total_length, cvv_length
-    ("VISA", "400000", 16, 3),
-    ("VISA", "424242", 16, 3),
-    ("VISA", "411111", 16, 3),
-    ("MASTERCARD", "555555", 16, 3),
-    ("MASTERCARD", "510510", 16, 3),
-    ("MASTERCARD", "222300", 16, 3),
-    ("AMEX", "378282", 15, 4),
-    ("AMEX", "371449", 15, 4),
-    ("DISCOVER", "601111", 16, 3),
-    ("JCB", "353011", 16, 3),
-    ("DINERS", "305693", 14, 3),
-]
-
-ACQUIRER_ID = "ACQ-TESTPOC-001"
 
 
 # --------------------------------------------------------------------------
@@ -197,6 +112,10 @@ def random_cvv(length: int) -> str:
     return "".join(str(random.randint(0, 9)) for _ in range(length))
 
 
+def random_pin(length: int = 4) -> str:
+    return "".join(str(random.randint(0, 9)) for _ in range(length))
+
+
 def build_track2(pan: str, expiry_mmYY: str, service_code="201"):
     mm, yy = expiry_mmYY.split("/")
     disc = "".join(str(random.randint(0, 9)) for _ in range(8))
@@ -219,13 +138,13 @@ def generate_merchants(n):
     merchants = []
     for i in range(n):
         mid = gen_id("MERCH", i + 1, 6)
-        mcc, mcc_desc = random.choice(MCC_TABLE)
+        mcc, mcc_desc = random.choice(reference.MCC_TABLE)
         merchants.append({
             "merchant_id": mid,
             "legal_name": MERCHANT_NAMES[i % len(MERCHANT_NAMES)] + (f" #{i // len(MERCHANT_NAMES) + 1}" if i >= len(MERCHANT_NAMES) else ""),
             "mcc": mcc,
             "mcc_description": mcc_desc,
-            "acquirer_id": ACQUIRER_ID,
+            "acquirer_id": reference.ACQUIRER_ID,
             "business_type": random.choice(["SOLE_PROPRIETOR", "LLC", "CORPORATION", "PARTNERSHIP"]),
             "onboarded_date": (datetime(2022, 1, 1) + timedelta(days=random.randint(0, 900))).strftime("%Y-%m-%d"),
             "address": {
@@ -255,35 +174,58 @@ def generate_terminals(merchants, per_merchant_range=(1, 4)):
     return terminals
 
 
-def generate_cards(n):
+def generate_cards_and_pins(n, issuer_zpks):
+    """Returns (cards, customer_pins). cards never carries a plaintext
+    PIN -- only an ISO-4 block, enciphered under the owning issuer's ZPK,
+    the way an issuer's own PIN store would hold it. customer_pins is a
+    separate, clearly test-only oracle (see module docstring)."""
     cards = []
+    customer_pins = {}
     for i in range(n):
-        network, prefix, length, cvv_len = random.choice(NETWORKS)
+        network, prefix, length, cvv_len = random.choice(reference.NETWORKS)
         pan = generate_pan(prefix, length)
         base_date = datetime(2026, 9, 5)
         expiry = random_expiry(base_date)
+        card_id = gen_id("CARD", i + 1, 6)
+        issuer_id = reference.issuer_id_for_network(network)
+        pin = random_pin()
+
+        pin_block = iso4_encode_pin_block(pin, pan, issuer_zpks[issuer_id])
+
         cards.append({
-            "card_id": gen_id("CARD", i + 1, 6),
+            "card_id": card_id,
             "pan": pan,
             "cardholder_name": random_name(),
             "expiry_date": expiry,
             "cvv": random_cvv(cvv_len),
             "track2": build_track2(pan, expiry),
             "card_network": network,
+            "issuer_id": issuer_id,
             "issuing_bin": pan[:6],
+            "pin_block_at_rest_hex": pin_block.hex(),
             "created_at": (base_date - timedelta(days=random.randint(30, 900))).strftime("%Y-%m-%d"),
         })
-    return cards
+        # keyed by PAN, not card_id: a real terminal only ever has the
+        # PAN it just read, never an acquirer/issuer-internal surrogate key
+        customer_pins[pan] = pin
+    return cards, customer_pins
+
+
+def pin_present_for_entry_mode(pos_entry_mode: str) -> bool:
+    p = reference.PIN_PRESENT_PROBABILITY.get(pos_entry_mode, 0.0)
+    return random.random() < p
 
 
 def generate_authorizations(n, merchants, terminals, cards, days_back=30):
+    """Request-only records: no response fields, because the response is
+    now decided live by the issuer-simulator, not pre-baked here."""
     terms_by_merchant = {}
     for t in terminals:
         terms_by_merchant.setdefault(t["merchant_id"], []).append(t)
 
     now = datetime(2026, 9, 5, 12, 0, 0)
     auths = []
-    for i in range(n):
+    for _ in range(n):
         merchant = random.choice(merchants)
         terminal = random.choice(terms_by_merchant[merchant["merchant_id"]])
         card = random.choice(cards)
@@ -293,9 +235,9 @@ def generate_authorizations(n, merchants, terminals, cards, days_back=30):
             minutes=random.randint(0, 59),
             seconds=random.randint(0, 59),
         )
-        resp_code, resp_text, resp_status = weighted_choice(RESPONSE_CODES, RESPONSE_WEIGHTS)
-        currency = random.choice(CURRENCIES)
+        currency = random.choice(reference.CURRENCIES)
         amount_major = round(random.uniform(1.00, 850.00), 2)
+        pos_entry_mode = random.choice(reference.POS_ENTRY_MODES)
 
         auths.append({
             "transaction_id": str(uuid.uuid4()),
@@ -304,206 +246,52 @@ def generate_authorizations(n, merchants, terminals, cards, days_back=30):
             "pan": card["pan"],
             "expiry_date": card["expiry_date"],
             "card_network": card["card_network"],
-            "transaction_type": random.choice(TXN_TYPES),
+            "transaction_type": random.choice(reference.TXN_TYPES),
             "amount": f"{amount_major:.2f}",
             "currency_code_numeric": currency[0],
             "currency_code_alpha": currency[1],
             "mcc": merchant["mcc"],
-            "pos_entry_mode": random.choice(POS_ENTRY_MODES),
-            "auth_code": "".join(str(random.randint(0, 9)) for _ in range(6)),
-            "response_code": resp_code,
-            "response_text": resp_text,
-            "response_status": resp_status,
+            "pos_entry_mode": pos_entry_mode,
+            "pin_present": pin_present_for_entry_mode(pos_entry_mode),
             "stan": f"{random.randint(0, 999999):06d}",
             "retrieval_reference_number": "".join(str(random.randint(0, 9)) for _ in range(12)),
-            "avs_result": random.choice(["Y", "N", "A", "Z", "U"]),
-            "cvv_result": random.choice(["M", "N", "P", "U"]),
-            "acquirer_id": ACQUIRER_ID,
+            "acquirer_id": reference.ACQUIRER_ID,
             "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
     return auths
+
+
+def generate_keys(terminals):
+    terminal_zpks = {t["terminal_id"]: generate_aes_key() for t in terminals}
+    issuer_zpks = {f"ISSUER-{name}": generate_aes_key() for name in reference.NETWORK_NAMES}
+    return terminal_zpks, issuer_zpks
 
 
 # --------------------------------------------------------------------------
 # Writers
 # --------------------------------------------------------------------------
 
-def write_csv(path, rows, fieldnames):
+def write_json(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in rows:
-            flat = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in r.items() if k in fieldnames}
-            w.writerow(flat)
-
-
-def write_schema_sql(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    schema = """\
--- Synthetic merchant-acquiring schema for encryption POC testing.
--- pan / cvv / track2 / cardholder_name are the columns intended to be
--- protected by application-level, tokenization, or transparent
--- storage-layer encryption controls (any vendor).
--- cardholder_name, cvv and track2 live only on the cards table (the
--- card vault), not on authorizations: they are not part of the data a
--- merchant would see in an ISO 8583 authorization message/response,
--- so they are looked up via cards.pan when needed rather than
--- denormalized onto every transaction.
-
-CREATE TABLE IF NOT EXISTS merchants (
-    merchant_id     TEXT PRIMARY KEY,
-    legal_name      TEXT NOT NULL,
-    mcc             TEXT NOT NULL,
-    mcc_description TEXT,
-    acquirer_id     TEXT NOT NULL,
-    business_type   TEXT,
-    onboarded_date  TEXT,
-    address_line1   TEXT,
-    address_city    TEXT,
-    address_country TEXT,
-    address_postal  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS terminals (
-    terminal_id     TEXT PRIMARY KEY,
-    merchant_id     TEXT NOT NULL REFERENCES merchants(merchant_id),
-    terminal_type   TEXT,
-    serial_number   TEXT,
-    location        TEXT
-);
-
-CREATE TABLE IF NOT EXISTS cards (
-    card_id         TEXT PRIMARY KEY,
-    pan             TEXT NOT NULL,        -- sensitive: PAN
-    cardholder_name TEXT NOT NULL,        -- sensitive
-    expiry_date     TEXT NOT NULL,        -- sensitive
-    cvv             TEXT NOT NULL,        -- sensitive, out of scope for storage in real systems (test-only)
-    track2          TEXT NOT NULL,        -- sensitive
-    card_network    TEXT NOT NULL,
-    issuing_bin     TEXT NOT NULL,
-    created_at      TEXT
-);
-
-CREATE TABLE IF NOT EXISTS authorizations (
-    transaction_id              TEXT PRIMARY KEY,
-    merchant_id                 TEXT NOT NULL REFERENCES merchants(merchant_id),
-    terminal_id                 TEXT NOT NULL REFERENCES terminals(terminal_id),
-    pan                         TEXT NOT NULL,   -- sensitive (denormalized for encryption-at-rest testing)
-    expiry_date                 TEXT NOT NULL,   -- sensitive
-    card_network                TEXT NOT NULL,
-    transaction_type            TEXT NOT NULL,
-    amount                      TEXT NOT NULL,
-    currency_code_numeric       TEXT NOT NULL,
-    currency_code_alpha         TEXT NOT NULL,
-    mcc                         TEXT,
-    pos_entry_mode              TEXT,
-    auth_code                   TEXT,
-    response_code               TEXT,
-    response_text               TEXT,
-    response_status             TEXT,
-    stan                        TEXT,
-    retrieval_reference_number  TEXT,
-    avs_result                  TEXT,
-    cvv_result                  TEXT,
-    acquirer_id                 TEXT,
-    timestamp                   TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_auth_merchant ON authorizations(merchant_id);
-CREATE INDEX IF NOT EXISTS idx_auth_pan ON authorizations(pan);
-CREATE INDEX IF NOT EXISTS idx_auth_timestamp ON authorizations(timestamp);
-"""
     with open(path, "w") as f:
-        f.write(schema)
-    return schema
-
-
-def write_sqlite_db(path, schema_sql, merchants, terminals, cards, auths):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.exists(path):
-        os.remove(path)
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.executescript(schema_sql)
-
-    cur.executemany(
-        "INSERT INTO merchants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [(m["merchant_id"], m["legal_name"], m["mcc"], m["mcc_description"], m["acquirer_id"],
-          m["business_type"], m["onboarded_date"], m["address"]["line1"], m["address"]["city"],
-          m["address"]["country"], m["address"]["postal_code"]) for m in merchants],
-    )
-    cur.executemany(
-        "INSERT INTO terminals VALUES (?,?,?,?,?)",
-        [(t["terminal_id"], t["merchant_id"], t["terminal_type"], t["serial_number"], t["location"]) for t in terminals],
-    )
-    cur.executemany(
-        "INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?)",
-        [(c["card_id"], c["pan"], c["cardholder_name"], c["expiry_date"], c["cvv"],
-          c["track2"], c["card_network"], c["issuing_bin"], c["created_at"]) for c in cards],
-    )
-    cur.executemany(
-        "INSERT INTO authorizations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [(a["transaction_id"], a["merchant_id"], a["terminal_id"], a["pan"],
-          a["expiry_date"], a["card_network"], a["transaction_type"],
-          a["amount"], a["currency_code_numeric"], a["currency_code_alpha"], a["mcc"], a["pos_entry_mode"],
-          a["auth_code"], a["response_code"], a["response_text"], a["response_status"], a["stan"],
-          a["retrieval_reference_number"], a["avs_result"], a["cvv_result"], a["acquirer_id"], a["timestamp"])
-         for a in auths],
-    )
-    conn.commit()
-    conn.close()
-
-
-def write_json_files_per_auth(base_dir, auths):
-    for a in auths:
-        ts = datetime.strptime(a["timestamp"], "%Y-%m-%dT%H:%M:%SZ")
-        day_dir = os.path.join(base_dir, a["merchant_id"], ts.strftime("%Y-%m-%d"))
-        os.makedirs(day_dir, exist_ok=True)
-        path = os.path.join(day_dir, f"{a['transaction_id']}.json")
-        with open(path, "w") as f:
-            json.dump(a, f, indent=2)
-
-
-def write_authorizations_xml(path, auths):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    root = ET.Element("Authorizations")
-    for a in auths:
-        txn = ET.SubElement(root, "Authorization", {"id": a["transaction_id"]})
-        for k, v in a.items():
-            if k == "transaction_id":
-                continue
-            el = ET.SubElement(txn, k)
-            el.text = str(v)
-    tree = ET.ElementTree(root)
-    ET.indent(tree, space="  ")
-    tree.write(path, encoding="utf-8", xml_declaration=True)
+        json.dump(obj, f, indent=2)
 
 
 def write_reference_data(ref_dir):
     os.makedirs(ref_dir, exist_ok=True)
 
-    with open(os.path.join(ref_dir, "mcc_codes.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["mcc", "description"])
-        w.writerows(MCC_TABLE)
-
-    with open(os.path.join(ref_dir, "currency_codes.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["numeric_code", "alpha_code", "minor_unit", "name"])
-        w.writerows(CURRENCIES)
-
-    with open(os.path.join(ref_dir, "response_codes.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["code", "description", "status"])
-        w.writerows(RESPONSE_CODES)
+    write_json(os.path.join(ref_dir, "mcc_codes.json"),
+               [{"mcc": m, "description": d} for m, d in reference.MCC_TABLE])
+    write_json(os.path.join(ref_dir, "currency_codes.json"),
+               [{"numeric_code": n, "alpha_code": a, "minor_unit": u, "name": name} for n, a, u, name in reference.CURRENCIES])
+    write_json(os.path.join(ref_dir, "response_codes.json"),
+               [{"code": c, "description": d, "status": s} for c, d, s in reference.RESPONSE_CODES])
 
     bin_ranges = [
         {"network": n, "bin_prefix": p, "pan_length": l, "cvv_length": c, "range_type": "TEST_SANDBOX_ONLY"}
-        for (n, p, l, c) in NETWORKS
+        for (n, p, l, c) in reference.NETWORKS
     ]
-    with open(os.path.join(ref_dir, "bin_ranges.json"), "w") as f:
-        json.dump(bin_ranges, f, indent=2)
+    write_json(os.path.join(ref_dir, "bin_ranges.json"), bin_ranges)
 
     card_networks = {
         "VISA": {"pan_lengths": [16], "cvv_field": "CVV2", "cvv_length": 3, "luhn": True},
@@ -513,8 +301,7 @@ def write_reference_data(ref_dir):
         "JCB": {"pan_lengths": [16], "cvv_field": "CAV2", "cvv_length": 3, "luhn": True},
         "DINERS": {"pan_lengths": [14], "cvv_field": "CVV", "cvv_length": 3, "luhn": True},
     }
-    with open(os.path.join(ref_dir, "card_networks.json"), "w") as f:
-        json.dump(card_networks, f, indent=2)
+    write_json(os.path.join(ref_dir, "card_networks.json"), card_networks)
 
 
 def write_merchant_reference(ref_dir, merchants, terminals):
@@ -524,14 +311,8 @@ def write_merchant_reference(ref_dir, merchants, terminals):
 
     for m in merchants:
         mdir = os.path.join(ref_dir, "merchants", m["merchant_id"])
-        os.makedirs(mdir, exist_ok=True)
-        with open(os.path.join(mdir, "profile.json"), "w") as f:
-            json.dump(m, f, indent=2)
-        with open(os.path.join(mdir, "terminals.csv"), "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["terminal_id", "merchant_id", "terminal_type", "serial_number", "location"])
-            w.writeheader()
-            for t in terms_by_merchant.get(m["merchant_id"], []):
-                w.writerow(t)
+        write_json(os.path.join(mdir, "profile.json"), m)
+        write_json(os.path.join(mdir, "terminals.json"), terms_by_merchant.get(m["merchant_id"], []))
 
 
 # --------------------------------------------------------------------------
@@ -546,52 +327,53 @@ def main():
     ap.add_argument("--authorizations", type=int, default=200000)
     ap.add_argument("--days-back", type=int, default=30)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--if-missing", action="store_true",
+                     help="skip generation entirely if data/seed/authorizations.json already "
+                          "exists. AES keys are generated with the secrets module, not the "
+                          "--seed'd random one, so they differ on every run; if a compose/orchestration "
+                          "tool re-triggers this one-shot generator more than once (some do, against "
+                          "a service meant to run exactly once), a second run would silently replace "
+                          "cards.json's at-rest PIN blocks and keys.json's ZPKs with a fresh, "
+                          "inconsistent pair out from under services that already read the first set. "
+                          "This flag is what the seed-generator container passes by default.")
     args = ap.parse_args()
+
+    marker = os.path.join(args.out, "seed", "authorizations.json")
+    if args.if_missing and os.path.exists(marker):
+        print(f"{marker} already exists and --if-missing was given; skipping generation.")
+        return
 
     random.seed(args.seed)
 
     merchants = generate_merchants(args.merchants)
     terminals = generate_terminals(merchants)
-    cards = generate_cards(args.cards)
+    terminal_zpks, issuer_zpks = generate_keys(terminals)
+    cards, customer_pins = generate_cards_and_pins(args.cards, issuer_zpks)
     auths = generate_authorizations(args.authorizations, merchants, terminals, cards, args.days_back)
 
     out = args.out
 
-    # --- database ingestion form ---
-    schema_sql = write_schema_sql(os.path.join(out, "db", "schema.sql"))
-    write_csv(os.path.join(out, "db", "csv", "merchants.csv"), [
-        {**m, "address_line1": m["address"]["line1"], "address_city": m["address"]["city"],
-         "address_country": m["address"]["country"], "address_postal": m["address"]["postal_code"]}
-        for m in merchants
-    ], ["merchant_id", "legal_name", "mcc", "mcc_description", "acquirer_id", "business_type",
-        "onboarded_date", "address_line1", "address_city", "address_country", "address_postal"])
-    write_csv(os.path.join(out, "db", "csv", "terminals.csv"), terminals,
-              ["terminal_id", "merchant_id", "terminal_type", "serial_number", "location"])
-    write_csv(os.path.join(out, "db", "csv", "cards.csv"), cards,
-              ["card_id", "pan", "cardholder_name", "expiry_date", "cvv", "track2",
-               "card_network", "issuing_bin", "created_at"])
-    write_csv(os.path.join(out, "db", "csv", "authorizations.csv"), auths,
-              ["transaction_id", "merchant_id", "terminal_id", "pan",
-               "expiry_date", "card_network", "transaction_type",
-               "amount", "currency_code_numeric", "currency_code_alpha", "mcc", "pos_entry_mode",
-               "auth_code", "response_code", "response_text", "response_status", "stan",
-               "retrieval_reference_number", "avs_result", "cvv_result", "acquirer_id", "timestamp"])
-    write_sqlite_db(os.path.join(out, "db", "payments.db"), schema_sql, merchants, terminals, cards, auths)
+    # --- seed data for the live simulation ---
+    write_json(os.path.join(out, "seed", "merchants.json"), merchants)
+    write_json(os.path.join(out, "seed", "terminals.json"), terminals)
+    write_json(os.path.join(out, "seed", "cards.json"), cards)
+    write_json(os.path.join(out, "seed", "authorizations.json"), auths)
+    write_json(os.path.join(out, "seed", "customer_pins.json"), customer_pins)
 
-    # --- structured files (same data) ---
-    write_json_files_per_auth(os.path.join(out, "structured", "json", "authorizations"), auths)
-    with open(os.path.join(out, "structured", "json", "authorizations_all.json"), "w") as f:
-        json.dump(auths, f, indent=2)
-    write_authorizations_xml(os.path.join(out, "structured", "xml", "authorizations.xml"), auths)
+    # --- keys (TEST-ONLY plaintext custody -- see module docstring) ---
+    write_json(os.path.join(out, "keys", "keys.json"), {
+        "terminals": {tid: key_to_hex(k) for tid, k in terminal_zpks.items()},
+        "issuers": {iid: key_to_hex(k) for iid, k in issuer_zpks.items()},
+    })
 
-    # --- generic reference data ---
+    # --- generic, non-cardholder reference data ---
     write_reference_data(os.path.join(out, "reference"))
     write_merchant_reference(os.path.join(out, "reference"), merchants, terminals)
 
     print(f"Merchants:      {len(merchants)}")
     print(f"Terminals:      {len(terminals)}")
     print(f"Cards:          {len(cards)}")
-    print(f"Authorizations: {len(auths)}")
+    print(f"Authorizations: {len(auths)} (request templates, no responses)")
     print(f"Written under:  {os.path.abspath(out)}")
 
 
