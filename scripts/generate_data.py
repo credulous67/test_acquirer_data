@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Synthetic merchant-acquiring payment data generator for encryption POC testing
-(CADP / CTE / CDP and vendor equivalents).
+of application-level field encryption, gateway/API tokenization, and
+transparent file/directory encryption, regardless of vendor.
 
 ALL data produced by this script is fake:
   - PANs are built from publicly-documented test/sandbox BIN prefixes
@@ -342,7 +343,8 @@ def write_schema_sql(path):
     schema = """\
 -- Synthetic merchant-acquiring schema for encryption POC testing.
 -- pan / cvv / track2 / cardholder_name are the columns intended to be
--- protected by CADP / CTE / CDP (or vendor-equivalent) controls.
+-- protected by application-level, tokenization, or transparent
+-- storage-layer encryption controls (any vendor).
 -- cardholder_name, cvv and track2 live only on the cards table (the
 -- card vault), not on authorizations: they are not part of the data a
 -- merchant would see in an ISO 8583 authorization message/response,

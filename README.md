@@ -1,9 +1,9 @@
 # Merchant Acquiring Payment Data — Encryption POC Test Set
 
 Synthetic test data for a merchant-acquiring encryption POC covering
-field/column-level encryption (CADP-style), gateway/API tokenization
-(CDP-style), and file/directory transparent encryption (CTE-style) —
-or the equivalent products from other vendors.
+three common protection patterns: application-level field/column
+encryption, gateway/API tokenization, and transparent file/directory
+encryption at the storage layer — regardless of vendor.
 
 ## Important: this data is entirely fake
 
@@ -52,8 +52,8 @@ data/
 │   ├── json/
 │   │   ├── authorizations/<merchant_id>/<yyyy-mm-dd>/<txn_id>.json
 │   │   │                               200,000 individual files across ~250 merchant dirs
-│   │   │                               x ~30 date dirs — useful for exercising CTE-style
-│   │   │                               per-directory / per-file transparent encryption
+│   │   │                               x ~30 date dirs — useful for exercising transparent,
+│   │   │                               storage-layer per-directory / per-file encryption
 │   │   │                               policies rather than one large blob
 │   │   └── authorizations_all.json     same 200,000 records as one JSON array
 │   └── xml/
@@ -73,8 +73,8 @@ data/
 `reference/` is deliberately free of cardholder data — it's split out
 from `db/` and `structured/` so you can test differentiated encryption
 policies (e.g. encrypt everything under `db/` and `structured/`, leave
-`reference/` in clear text) the way a real CTE deployment would be
-scoped by directory.
+`reference/` in clear text) the way a transparent, storage-layer
+encryption deployment would typically be scoped by directory.
 
 ## Data volumes (default run)
 
@@ -114,14 +114,15 @@ Full column list and types: see `data/db/schema.sql`.
 
 ## Suggested test uses
 
-- **CADP-style app-level encryption**: encrypt/tokenize `pan`, `cvv`,
-  `track2`, `cardholder_name` in `cards.csv` (or the SQLite `cards`
-  table) and `pan` in `authorizations`; verify format-preserving/
-  tokenized PAN values still join correctly between the two tables.
-- **CDP-style gateway tokenization**: replay `authorizations_all.json`
-  or the per-file JSON records as simulated API payloads through a
+- **Application-level field/column encryption**: encrypt/tokenize
+  `pan`, `cvv`, `track2`, `cardholder_name` in `cards.csv` (or the
+  SQLite `cards` table) and `pan` in `authorizations`; verify
+  format-preserving/tokenized PAN values still join correctly between
+  the two tables.
+- **Gateway/API tokenization**: replay `authorizations_all.json` or
+  the per-file JSON records as simulated API payloads through a
   tokenization proxy; check masked/tokenized output.
-- **CTE-style transparent file/directory encryption**: point policies
-  at `data/db/`, `data/structured/json/authorizations/`, and
+- **Transparent file/directory encryption**: point policies at
+  `data/db/`, `data/structured/json/authorizations/`, and
   `data/structured/xml/` (sensitive) versus `data/reference/`
   (non-sensitive) and confirm access/encryption behaves per directory.
