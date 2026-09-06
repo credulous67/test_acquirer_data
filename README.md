@@ -125,10 +125,24 @@ test *before* this leg was pooled, `gateway-1`'s merchant-facing port
 showed 4412 TIME_WAIT sockets against only 254 ESTABLISHED — a fresh
 TCP connection was being opened and torn down for every single
 transaction. After pooling it, the same test showed 0 TIME_WAIT on that
-port. (That same investigation also turned up a second, unrelated
-source of connection churn worth knowing about if you go looking:
-`report_event()`'s `httpx.AsyncClient` posts to the dashboard show
-heavy TIME_WAIT under load too — that one's still open.)
+port.
+
+That same investigation turned up a second, unrelated source of
+connection churn: `report_event()`'s `httpx.AsyncClient` posts to the
+dashboard showed 6062 TIME_WAIT against only 20 ESTABLISHED under load —
+the 20 an exact match for httpx's own default `max_keepalive_connections`.
+httpx already pools connections internally; its default pool was just
+sized for a low-concurrency client, not one with up to `CONCURRENCY_LIMIT`
+transactions each posting events around the same time. Every `httpx.
+AsyncClient` in this system (gateway, merchant-simulator, issuer-simulator)
+now passes an explicit `httpx.Limits` sized to its actual concurrency —
+`CONCURRENCY_LIMIT` for the gateway's client, a smaller fixed headroom
+for the other two, whose control-plane polling is cached and far lower
+volume. `services/common/control.py`'s `ControlPoller` also gained a
+lock around its cache refresh, so many callers seeing the cache go stale
+in the same instant coalesce into one dashboard request instead of each
+firing their own. Re-running the same 10x load test afterwards showed
+0 TIME_WAIT on the gateway's dashboard connection throughout.
 
 ### Horizontal scaling: multiple gateway and issuer-simulator replicas
 

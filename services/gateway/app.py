@@ -94,7 +94,23 @@ CONCURRENCY_LIMIT = int(os.environ.get("CONCURRENCY_LIMIT", "150"))
 
 TERMINAL_KEYS = {}
 ISSUER_TRANSIT_KEYS = {}
-_http = httpx.AsyncClient(timeout=2.0)
+# report_event() below can have up to CONCURRENCY_LIMIT transactions each
+# posting to the dashboard around the same time, but httpx's own default
+# connection-pool limits (max_keepalive_connections=20) are far smaller
+# than that -- found by measurement, not guesswork: under load this
+# client showed 20 ESTABLISHED against 6062 TIME_WAIT to the dashboard,
+# the 20 an exact match for that default. Requests beyond the keepalive
+# cap still succeed, but their connection gets closed rather than kept
+# alive, so a fresh handshake (and a spent one cycling through TIME_WAIT)
+# happens next time instead of a reuse -- the same problem the pooling
+# above solves for the ISO 8583 hops, just inside httpx's own pool
+# instead of a hand-rolled one. Sizing both limits to CONCURRENCY_LIMIT
+# (with headroom on the hard cap) lets every concurrent transaction's
+# event posts actually get reused.
+_http = httpx.AsyncClient(
+    timeout=2.0,
+    limits=httpx.Limits(max_connections=CONCURRENCY_LIMIT * 2, max_keepalive_connections=CONCURRENCY_LIMIT),
+)
 _dump_count = 0
 _dump_lock = asyncio.Lock()
 _concurrency = asyncio.Semaphore(CONCURRENCY_LIMIT)

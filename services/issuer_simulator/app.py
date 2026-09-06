@@ -60,7 +60,12 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 CARDS_BY_PAN = {}
 ISSUER_TRANSIT_KEYS = {}
 ISSUER_STORAGE_KEYS = {}
-_http = httpx.AsyncClient(timeout=2.0)
+# Modest headroom over httpx's own default (max_keepalive_connections=20)
+# for the same reason as the gateway's own _http client (see
+# services/gateway/app.py) -- this process's control-plane polling is
+# cached (see ControlPoller) so its call volume is far lower, but there's
+# no reason to leave it exposed to the same failure mode.
+_http = httpx.AsyncClient(timeout=2.0, limits=httpx.Limits(max_connections=100, max_keepalive_connections=50))
 _control = ControlPoller(_http, DASHBOARD_URL)
 
 
