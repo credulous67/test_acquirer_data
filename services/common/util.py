@@ -29,6 +29,29 @@ async def wait_for_files(paths, timeout=120, poll_interval=1.0):
         missing = [p for p in paths if not os.path.exists(p)]
 
 
+def parse_host_list(value: str, default_port: int) -> list:
+    """Parses a comma-separated "host[:port]" list (e.g.
+    "gateway-1:8583,gateway-2:8583") into [(host, port), ...], defaulting
+    a bare host's port to `default_port`. Used wherever a service now
+    talks to more than one replica of a downstream service -- see
+    GATEWAY_HOSTS / ISSUER_HOSTS -- so a single-entry list (the common
+    case when nobody has scaled anything out) is just the degenerate
+    case of the same code path, not a separate one."""
+    hosts = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" in entry:
+            host, port = entry.rsplit(":", 1)
+            hosts.append((host, int(port)))
+        else:
+            hosts.append((entry, default_port))
+    if not hosts:
+        raise ValueError(f"empty host list: {value!r}")
+    return hosts
+
+
 def setup_logging(name: str):
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),

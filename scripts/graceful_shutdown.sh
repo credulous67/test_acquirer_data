@@ -53,7 +53,7 @@ echo "==> Stopping gateway, issuer-simulator, dashboard, postgres"
 if [ "$FINAL_ACTION" = "down" ]; then
     $COMPOSE down
 else
-    $COMPOSE stop gateway issuer-simulator dashboard postgres
+    $COMPOSE stop gateway-1 gateway-2 issuer-simulator-1 issuer-simulator-2 dashboard postgres
 fi
 
 if [ "$FINAL_ACTION" = "down" ]; then

@@ -8,6 +8,7 @@ changing DATABASE_URL and installing the matching async driver, not
 rewriting this module. See README.md "Swapping the database" for the
 exact steps to move this to MySQL.
 """
+import logging
 import os
 
 from sqlalchemy import (
@@ -70,14 +71,38 @@ def get_engine():
         # default pool (5) queues or drops connections under that burst,
         # so both the pool and the overflow allowance are sized well past
         # normal steady-state load to absorb it.
-        _engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=60)
+        #
+        # This pool is sized per gateway *replica* -- a single replica can
+        # never have more than CONCURRENCY_LIMIT transactions in flight
+        # (services/gateway/app.py's semaphore), each holding at most one
+        # connection at a time, so pool_size + max_overflow here tracks
+        # that same default (150) plus a little headroom rather than an
+        # arbitrary bigger number. With N gateway replicas (podman-
+        # compose.yml's gateway-1/gateway-2), total demand across all of
+        # them is at most N x 150 -- Postgres's own max_connections there
+        # is set to match (300, for the default 2 replicas). Scaling out
+        # to more replicas means raising max_connections proportionally,
+        # not this pool.
+        _engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, pool_size=50, max_overflow=100)
     return _engine
 
 
 async def init_db():
     engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+    except Exception as exc:
+        # Multiple gateway replicas can start concurrently (see
+        # podman-compose.yml's gateway-1/gateway-2) and race to create the
+        # schema on first boot; metadata.create_all()'s own check-then-
+        # create isn't atomic across processes, so the loser of that race
+        # can see a duplicate-table/index error here even though the
+        # outcome (schema now exists) is exactly what we wanted. Logging
+        # and continuing is safe -- any *other* kind of DB problem (bad
+        # DATABASE_URL, Postgres unreachable) surfaces immediately anyway,
+        # loudly, on this replica's very first insert_request() below.
+        logging.getLogger(__name__).warning("init_db: %s (likely a concurrent replica race, continuing)", exc)
 
 
 async def insert_request(record: dict):

@@ -180,9 +180,13 @@ function applyStats(stats) {
   }
   tpsChart.update();
 
+  // null (too few transactions in the window to mean anything) is pushed
+  // through as-is, not defaulted to 0 -- Chart.js renders a null point as
+  // a gap in the line/area, which is what we want: honestly show "no
+  // data" for that stretch rather than a misleading flat or zeroed value.
   outcomeChart.data.labels.push(label);
-  outcomeChart.data.datasets[0].data.push(stats.window_approve_pct ?? 0);
-  outcomeChart.data.datasets[1].data.push(stats.window_decline_pct ?? 0);
+  outcomeChart.data.datasets[0].data.push(stats.window_approve_pct);
+  outcomeChart.data.datasets[1].data.push(stats.window_decline_pct);
   if (outcomeChart.data.labels.length > MAX_POINTS) {
     outcomeChart.data.labels.shift();
     outcomeChart.data.datasets[0].data.shift();
@@ -193,7 +197,8 @@ function applyStats(stats) {
   authTypeChart.data.labels.push(label);
   const authTypePct = stats.auth_type_pct ?? {};
   AUTH_TYPES.forEach((t, i) => {
-    authTypeChart.data.datasets[i].data.push(authTypePct[t.label] ?? 0);
+    // null passes through as a gap -- see the comment above the outcomeChart push.
+    authTypeChart.data.datasets[i].data.push(authTypePct[t.label] ?? null);
   });
   if (authTypeChart.data.labels.length > MAX_POINTS) {
     authTypeChart.data.labels.shift();

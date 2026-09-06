@@ -48,27 +48,157 @@ software with no HSM hardware:
 
 ```mermaid
 flowchart LR
-    M["<b>merchant-simulator</b><br/>all merchants, one container<br/><i>jittered per-merchant start + send timing</i>"]
-    G["<b>acquirer-gateway</b><br/><i>random processing delay</i><br/>translates PIN block:<br/>terminal ZPK → issuer transit ZPK<br/>persists to DB"]
-    I["<b>issuer-simulator</b><br/>all issuers, one container<br/><i>random processing delay</i>"]
+    M["<b>merchant-simulator</b><br/>all merchants, one container<br/><i>jittered per-merchant start + send timing</i><br/>random gateway replica per transaction"]
+    subgraph GW [" "]
+        direction TB
+        G1["<b>gateway-1</b>"]
+        G2["<b>gateway-2</b>"]
+    end
+    subgraph ISS [" "]
+        direction TB
+        I1["<b>issuer-simulator-1</b>"]
+        I2["<b>issuer-simulator-2</b>"]
+    end
     DB[("PostgreSQL<br/>swappable, see below")]
     D["<b>dashboard</b><br/>stats, pause/resume, rate"]
     B["browser"]
 
-    M -- "ISO 8583 auth request" --> G
-    G -- "forward (ISO 8583)" --> I
-    I -- "response (mutated:<br/>response code, auth code)" --> G
-    G -- "auth response<br/>(mutated by issuer)" --> M
-    G -- "INSERT / UPDATE" --> DB
-    G -. "lifecycle events (best-effort)" .-> D
+    M -- "ISO 8583 auth request" --> GW
+    GW -- "forward (ISO 8583),<br/>random issuer replica per txn" --> ISS
+    ISS -- "response (mutated:<br/>response code, auth code)" --> GW
+    GW -- "auth response<br/>(mutated by issuer)" --> M
+    GW -- "INSERT / UPDATE" --> DB
+    GW -. "lifecycle events (best-effort)" .-> D
     D -- "WebSocket" --> B
     B -. "pause / resume / rate" .-> D
 ```
 
-The gateway is the only component that sees every hop of a transaction,
-so it's the sole source of the lifecycle events the dashboard displays.
-The merchant-simulator polls the dashboard for the current pause/rate
-state before sending each transaction.
+Each gateway replica applies a random processing delay, translates any
+PIN block from the terminal's ZPK to the issuer's transit ZPK, and
+persists to the shared Postgres instance; each issuer-simulator replica
+applies its own random processing delay and holds every issuer's cards
+and keys (they're identical, stateless processes, not sharded by
+issuer). The gateway tier is the only part of the system that sees every
+hop of a transaction, so it's the sole source of the lifecycle events
+the dashboard displays. The merchant-simulator polls the dashboard for
+the current pause/rate state before sending each transaction.
+
+### Throughput control: `CONCURRENCY_LIMIT` and connection pooling
+
+The gateway bounds how many transactions it processes at once with an
+`asyncio.Semaphore`, sized by the `CONCURRENCY_LIMIT` env var (default
+150). Without this, the merchant-simulator's fire-and-forget sends have
+no cap on how many transactions can be in flight simultaneously; under
+sustained high offered load, a small rise in per-transaction latency lets
+more and more pile up before any of them finish, which drives latency up
+further — a feedback loop that eventually exhausts the DB connection pool
+no matter how large it's sized (this was found the hard way: raising the
+pool from 80 to 200 connections just delayed the same collapse by half an
+hour instead of preventing it). The semaphore is the actual fix: once
+`CONCURRENCY_LIMIT` transactions are being processed, a new one simply
+waits for a slot — consuming nothing from the DB pool until then — so
+offered load self-limits to what the gateway can actually sustain.
+
+Both hops of the merchant→gateway→issuer path reuse persistent TCP
+connections (`ConnectionPool` in `services/common/pool.py`) instead of
+paying a fresh handshake per transaction:
+
+- the gateway's connections to the issuer, one pool per issuer replica
+  (sized to `CONCURRENCY_LIMIT`) — the issuer-simulator's connection
+  handler loops, reading further requests off the same connection
+  rather than handling one and closing;
+- the merchant-simulator's connections to the gateway, one pool per
+  gateway replica (sized to `MAX_OUTSTANDING`, see below) — the
+  gateway's `handle_merchant()` loops the same way on its side.
+
+A connection that errors on write or read (including the far side
+restarting) is discarded rather than returned to its pool, and the
+caller falls back to the same decline/drop handling a hard outage would
+always have produced — `91` (issuer unreachable) or `96` (generic
+failure) from the gateway, or a dropped/logged transaction from the
+merchant-simulator — rather than hanging or crashing. Pools recreate
+connections on demand up to their cap as old ones are discarded.
+
+Pooling the merchant→gateway leg specifically was added after measuring
+it as a real inefficiency, not just a hypothetical one: under a 10x load
+test *before* this leg was pooled, `gateway-1`'s merchant-facing port
+showed 4412 TIME_WAIT sockets against only 254 ESTABLISHED — a fresh
+TCP connection was being opened and torn down for every single
+transaction. After pooling it, the same test showed 0 TIME_WAIT on that
+port. (That same investigation also turned up a second, unrelated
+source of connection churn worth knowing about if you go looking:
+`report_event()`'s `httpx.AsyncClient` posts to the dashboard show
+heavy TIME_WAIT under load too — that one's still open.)
+
+### Horizontal scaling: multiple gateway and issuer-simulator replicas
+
+`podman-compose.yml` runs the gateway and issuer-simulator each as 2
+named, identical replicas (`gateway-1`/`gateway-2`,
+`issuer-simulator-1`/`issuer-simulator-2`) rather than one instance of
+each. Nothing in either service is stateful across a single
+transaction's handling — a gateway replica's only shared state is the
+Postgres database and the dashboard, both already designed to be written
+to from anywhere — so any number of identical processes can run side by
+side.
+
+Rather than relying on a compose tool's `--scale` plus DNS round-robin
+across replicas of one service name (unreliable under podman's embedded
+DNS in practice), each replica gets its own service name, and whichever
+service talks to it is handed every replica's `host:port` explicitly via
+a comma-separated `*_HOSTS` env var (parsed by
+`services/common/util.parse_host_list`), picking one at random per
+transaction:
+
+- `merchant-simulator`'s `GATEWAY_HOSTS` (default
+  `"gateway-1:8583,gateway-2:8583"`) — which gateway replica's
+  `ConnectionPool` a transaction is sent through.
+- `gateway-*`'s `ISSUER_HOSTS` (default
+  `"issuer-simulator-1:8584,issuer-simulator-2:8584"`) — which
+  issuer-simulator replica's `ConnectionPool` a gateway forwards
+  through (see above).
+
+A replica that's down just fails its connect/read and gets the same
+"91 issuer unreachable" or dropped-transaction handling a single-replica
+outage always had — nothing here assumes every replica is healthy.
+
+**To add a replica**: copy the relevant service block in
+`podman-compose.yml` (e.g. `gateway-2`) to a new name (`gateway-3`), add
+its `host:port` to the consuming service's `*_HOSTS` env var, and — for
+an added gateway replica specifically — raise Postgres's
+`max_connections` to cover the extra replica's `CONCURRENCY_LIMIT` (see
+`services/gateway/db.py`'s pool-sizing comment; each gateway replica's DB
+pool is sized to its own `CONCURRENCY_LIMIT`, so N replicas need
+Postgres to allow roughly `N × CONCURRENCY_LIMIT` connections).
+
+Both replicas' schemas race harmlessly on first boot: `init_db()`
+catches and logs the duplicate-table error from whichever replica loses
+the race to create the `authorizations` table, since the outcome
+(schema exists) is what both wanted anyway.
+
+### Merchant-side backpressure: `MAX_OUTSTANDING`
+
+The merchant-simulator originates transactions as independent
+fire-and-forget `asyncio` tasks (see `send_one` in
+`services/merchant_simulator/app.py`), so a slow gateway/issuer tier
+doesn't block a merchant from continuing to schedule new ones at its
+target rate. Before this existed, that meant the number of transactions
+actually connected and waiting on a response — the true resource cost —
+had no cap at all: it could grow without bound if the downstream
+couldn't keep up.
+
+`MAX_OUTSTANDING` (default 300) bounds that directly: `send_one` waits
+on a global `asyncio.Semaphore` of this size *before* opening its
+connection to a gateway, and holds it until the response (or a failure)
+comes back. A merchant's own send-pacing loop keeps scheduling new tasks
+at its target rate regardless — those tasks just queue on the
+semaphore, which costs nothing (no socket, no gateway-side resource) —
+so it's specifically the expensive part (open connections into the
+gateway tier) that self-limits when the downstream is saturated, the
+same principle as the gateway's own `CONCURRENCY_LIMIT` applied one hop
+further upstream. The default (300) is sized to roughly match the
+gateway tier's total capacity (2 replicas × `CONCURRENCY_LIMIT` 150 each)
+so the merchant-simulator won't try to keep more in flight than the
+gateway tier could ever process at once.
 
 ## Running it
 
@@ -82,8 +212,9 @@ podman-compose up --build
    terminals, cards (including at-rest-encrypted PIN blocks), a pool of
    authorization request templates, and the ZPKs.
 2. Starts Postgres and waits for it to be healthy.
-3. Starts the gateway, issuer-simulator and merchant-simulator, which
-   wait for the seed data to exist before doing anything.
+3. Starts the gateway and issuer-simulator replicas and the
+   merchant-simulator, which wait for the seed data to exist before
+   doing anything.
 4. Starts the dashboard on **http://localhost:8080**.
 
 Every service that consumes the seed data polls for its required files
@@ -150,8 +281,9 @@ generate.
 Some transactions carry a PIN (card-present entry modes only — CHIP and
 SWIPE at 50%, CONTACTLESS at 15%; never ECOM/MANUAL, which have no PIN
 pad). Each terminal has one AES-128 ZPK, and each issuer (one simulated
-issuer per card network — `ISSUER-VISA`, `ISSUER-MASTERCARD`, etc; the
-issuer-simulator container hosts all of them) has **two**, not one:
+issuer per card network — `ISSUER-VISA`, `ISSUER-MASTERCARD`, etc; every
+issuer-simulator replica hosts all of them, since they're identical
+stateless processes, not sharded by issuer) has **two**, not one:
 
 - a **transit ZPK** — the zone key for the gateway↔issuer link, used to
   receive PIN blocks arriving with a live authorization;

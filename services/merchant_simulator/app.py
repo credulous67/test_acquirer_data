@@ -7,13 +7,33 @@ so traffic doesn't begin in lock-step, then looping forever, drawing a
 request template from that merchant's own pool in data/seed/authorizations.json,
 freshening its identifiers/timestamp, occasionally attaching a PIN block
 (built fresh, enciphered under that terminal's own ZPK) or a CVV2 (for
-card-not-present templates), and sending it to the gateway over a new
-TCP connection per transaction.
+card-not-present templates), and sending it to the gateway over a
+connection borrowed from a services.common.pool.ConnectionPool (reused
+across many transactions rather than opened fresh each time -- the
+gateway's handle_merchant() loops reading further requests off the same
+connection rather than closing after one, so this reuse actually pays
+off instead of just adding a pointless extra layer).
 
 Overall traffic rate is TARGET_TPS, split across merchants in proportion
 to how many template transactions they have (busier merchants in the
 seed data stay busier live), and is controlled at runtime by polling the
 dashboard's pause/resume/rate-multiplier state.
+
+Each transaction picks a random gateway replica's connection pool from
+GATEWAY_HOSTS (see podman-compose.yml's gateway-1/gateway-2), so scaling
+the gateway out horizontally actually spreads merchant-originated load
+across it instead of every merchant hammering a single instance.
+
+MAX_OUTSTANDING is this process's own backpressure valve: a transaction
+only acquires a connection from a gateway pool once it acquires a slot
+from a global semaphore of that size, and holds the slot until the
+response (or failure) comes back. Each merchant's own send-pacing loop
+keeps scheduling new transactions at its target rate regardless -- it's
+the *sending* that queues up when the downstream is slow, not the
+scheduling -- so a slow gateway/issuer tier naturally caps how many
+connections this process ever has checked out from the pools, rather
+than every merchant's independent fire-and-forget tasks (see send_one
+below) piling up without bound the way they could before this existed.
 """
 import asyncio
 import os
@@ -28,7 +48,8 @@ import httpx
 from services.common import iso8583
 from services.common.control import ControlPoller
 from services.common.crypto import iso4_encode_pin_block, key_from_hex
-from services.common.util import load_json, setup_logging, wait_for_files
+from services.common.pool import ConnectionPool
+from services.common.util import load_json, parse_host_list, setup_logging, wait_for_files
 
 log = setup_logging("merchant-simulator")
 
@@ -40,10 +61,18 @@ CUSTOMER_PINS_PATH = os.path.join(SEED_DIR, "seed", "customer_pins.json")
 CUSTOMER_CVVS_PATH = os.path.join(SEED_DIR, "seed", "customer_cvvs.json")
 KEYS_PATH = os.path.join(SEED_DIR, "keys", "keys.json")
 
+# One or more "host:port" gateway replicas, comma-separated (e.g.
+# "gateway-1:8583,gateway-2:8583") -- falls back to the single
+# GATEWAY_HOST/GATEWAY_PORT pair when only one gateway is running.
 GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "gateway")
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8583"))
+GATEWAY_HOSTS = parse_host_list(os.environ.get("GATEWAY_HOSTS", f"{GATEWAY_HOST}:{GATEWAY_PORT}"), GATEWAY_PORT)
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://dashboard:8080")
 TARGET_TPS = float(os.environ.get("TARGET_TPS", "20"))
+# Caps how many transactions this process ever has in flight (connected
+# to a gateway and awaiting a response) at once -- see the module
+# docstring for why this is the merchant-side backpressure mechanism.
+MAX_OUTSTANDING = int(os.environ.get("MAX_OUTSTANDING", "300"))
 
 PIN_TYPO_PROBABILITY = 0.03
 CVV_TYPO_PROBABILITY = 0.03
@@ -51,6 +80,13 @@ CVV_TYPO_PROBABILITY = 0.03
 _http = httpx.AsyncClient(timeout=2.0)
 _control = ControlPoller(_http, DASHBOARD_URL)
 _stop_event = asyncio.Event()  # set on SIGTERM/SIGINT: stop *originating* new sends
+_outstanding = asyncio.Semaphore(MAX_OUTSTANDING)
+# One ConnectionPool per gateway replica (see GATEWAY_HOSTS above);
+# send_transaction() picks which replica's pool to use per call. Each
+# pool is sized to MAX_OUTSTANDING since that semaphore already caps how
+# many transactions can simultaneously need a gateway connection -- no
+# single pool should ever have to make a caller wait for one.
+_gateway_pools = [ConnectionPool(host, port, max_size=MAX_OUTSTANDING) for host, port in GATEWAY_HOSTS]
 
 
 def maybe_typo(value: str, probability: float) -> str:
@@ -106,16 +142,22 @@ def build_live_message(template: dict, terminal_key, customer_pins, customer_cvv
 
 
 async def send_transaction(values: dict):
-    reader, writer = await asyncio.open_connection(GATEWAY_HOST, GATEWAY_PORT)
+    # Picking a random gateway replica's pool per transaction (rather than
+    # sticky per-terminal or round-robin) needs no shared state and
+    # spreads load evenly over enough transactions; a replica that's down
+    # simply fails its connect/read below and this transaction gets
+    # dropped/logged the same way a single-gateway outage always would.
+    pool = random.choice(_gateway_pools)
+    reader, writer = await pool.acquire()
+    healthy = True
     try:
         await iso8583.write_message(writer, iso8583.MTI_AUTH_REQUEST, values)
         await iso8583.read_message(reader)
+    except Exception:
+        healthy = False
+        raise
     finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
+        await pool.release(reader, writer, healthy)
 
 
 _BACKGROUND_TASKS: set = set()
@@ -127,12 +169,17 @@ async def send_one(merchant_id: str, template: dict, terminal_key, customer_pins
     (e.g. the issuer is paused, see services/dashboard/app.py), this
     transaction just sits waiting for its response without blocking the
     merchant from originating further ones, which is what lets
-    outstanding authorizations actually pile up rather than capping out
-    at one per merchant."""
+    outstanding authorizations pile up across merchants rather than
+    capping out at one per merchant. The _outstanding semaphore is what
+    keeps that pile-up bounded overall: this task waits for a slot
+    *before* opening a connection, so a slow downstream throttles how
+    many sockets get opened, not just how many tasks exist (which cost
+    nothing here since they're just parked on the semaphore)."""
     try:
         await asyncio.sleep(random.uniform(0.01, 0.1))  # terminal processing time
         values = build_live_message(template, terminal_key, customer_pins, customer_cvvs)
-        await send_transaction(values)
+        async with _outstanding:
+            await send_transaction(values)
     except Exception as exc:
         # a single bad/dropped/stuck transaction must never take down
         # this merchant's task, let alone the whole asyncio.gather() below
@@ -150,6 +197,29 @@ async def _sleep_or_stop(seconds: float) -> bool:
         return False
 
 
+PAUSE_CHECK_INTERVAL = 1.0
+
+
+async def _sleep_or_interrupt(seconds: float) -> str:
+    """Sleeps up to `seconds` in short chunks, checking for shutdown *and*
+    a newly-active pause between each one, and returns as soon as either
+    fires ("stop"/"paused") rather than always sleeping the full duration.
+    Without this, a merchant whose next-send interval happened to be long
+    (at low TARGET_TPS with 250 merchants sharing it, the exponential
+    distribution's tail means tens of seconds is common) wouldn't notice
+    a pause click until that sleep finished on its own -- pause looked
+    like it took "an inordinate amount of time" for exactly this reason."""
+    elapsed = 0.0
+    while elapsed < seconds:
+        step = min(PAUSE_CHECK_INTERVAL, seconds - elapsed)
+        if await _sleep_or_stop(step):
+            return "stop"
+        elapsed += step
+        if (await _control.get()).get("merchant_paused"):
+            return "paused"
+    return "timeout"
+
+
 async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: dict, customer_pins: dict, customer_cvvs: dict):
     if await _sleep_or_stop(random.uniform(0, 10)):
         return
@@ -162,8 +232,11 @@ async def run_merchant(merchant_id: str, pool: list, lam: float, terminal_keys: 
             continue
 
         effective_lam = max(lam * control.get("rate_multiplier", 1.0), 0.001)
-        if await _sleep_or_stop(random.expovariate(effective_lam)):
+        result = await _sleep_or_interrupt(random.expovariate(effective_lam))
+        if result == "stop":
             break
+        if result == "paused":
+            continue  # loop back to the top, which handles the pause-wait properly
 
         template = random.choice(pool)
         terminal_key = terminal_keys.get(template["terminal_id"])
@@ -212,7 +285,10 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _stop_event.set)
 
-    log.info("simulating %d merchants, target %.1f tx/s combined", len(tasks), TARGET_TPS)
+    log.info(
+        "simulating %d merchants, target %.1f tx/s combined, %d gateway replica(s), max %d outstanding",
+        len(tasks), TARGET_TPS, len(GATEWAY_HOSTS), MAX_OUTSTANDING,
+    )
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for merchant_id, result in zip(merchant_ids, results):
         if isinstance(result, Exception):

@@ -108,31 +108,38 @@ def decide_response(req: dict) -> tuple[str, str | None]:
 
 
 async def handle_gateway(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """The gateway pools and reuses its connections to us (see
+    services/gateway/app.py's IssuerConnectionPool) rather than opening a
+    fresh one per transaction, so one connection here now carries many
+    requests over its lifetime -- loop reading them until the gateway
+    closes it (pool teardown, or gateway shutdown), instead of handling
+    exactly one and closing."""
     try:
-        mti, req = await iso8583.read_message(reader)
-    except (asyncio.IncompleteReadError, ConnectionResetError):
-        writer.close()
-        return
+        while True:
+            try:
+                mti, req = await iso8583.read_message(reader)
+            except (asyncio.IncompleteReadError, ConnectionResetError):
+                break
 
-    while (await _control.get()).get("issuer_paused"):
-        await asyncio.sleep(1.0)
+            while (await _control.get()).get("issuer_paused"):
+                await asyncio.sleep(1.0)
 
-    # simulated issuer host processing time, with an occasional slow one
-    delay = random.uniform(0.1, 0.8)
-    if random.random() < 0.05:
-        delay += random.uniform(1.0, 2.0)
-    await asyncio.sleep(delay)
+            # simulated issuer host processing time, with an occasional slow one
+            delay = random.uniform(0.1, 0.8)
+            if random.random() < 0.05:
+                delay += random.uniform(1.0, 2.0)
+            await asyncio.sleep(delay)
 
-    response_code, auth_code = decide_response(req)
+            response_code, auth_code = decide_response(req)
 
-    try:
-        await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
-            "transaction_id": req.get("transaction_id"),
-            "response_code": response_code,
-            "auth_code": auth_code,
-        })
-    except (ConnectionResetError, BrokenPipeError):
-        pass
+            try:
+                await iso8583.write_message(writer, iso8583.MTI_AUTH_RESPONSE, {
+                    "transaction_id": req.get("transaction_id"),
+                    "response_code": response_code,
+                    "auth_code": auth_code,
+                })
+            except (ConnectionResetError, BrokenPipeError):
+                break
     finally:
         writer.close()
         try:

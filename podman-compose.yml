@@ -6,6 +6,21 @@ version: "3.9"
 #
 # Run with: podman-compose up --build
 # (docker compose up --build also works against this same file)
+#
+# Horizontal scaling: gateway and issuer-simulator each run as 2 named
+# replicas below (gateway-1/gateway-2, issuer-simulator-1/issuer-simulator-2)
+# rather than a single instance scaled via `--scale` -- podman's embedded
+# DNS round-robin across scaled replicas of one service name isn't
+# reliable, so instead every replica gets its own service name, and the
+# consuming service is handed every replica's host:port explicitly via a
+# *_HOSTS env var (services/common/util.parse_host_list), picking one at
+# random per transaction. That makes the load-spreading explicit and
+# independent of DNS behavior. To add a third gateway replica: copy the
+# gateway-1 block below to gateway-3, add "gateway-3:8583" to
+# merchant-simulator's GATEWAY_HOSTS, and raise postgres's max_connections
+# (and re-check services/gateway/db.py's pool-sizing comment) to cover the
+# extra replica's CONCURRENCY_LIMIT. Adding an issuer-simulator replica is
+# the same idea via ISSUER_HOSTS on the gateway services.
 
 services:
   seed-generator:
@@ -22,6 +37,10 @@ services:
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
       POSTGRES_DB: payments
+    # matches the 2 gateway replicas' combined pool_size + max_overflow
+    # (services/gateway/db.py) with headroom -- the pool can never exceed
+    # what postgres itself allows
+    command: ["postgres", "-c", "max_connections=300"]
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -30,7 +49,7 @@ services:
       timeout: 5s
       retries: 10
 
-  gateway:
+  gateway-1:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
@@ -46,15 +65,50 @@ services:
       DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/payments
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: "8583"
-      ISSUER_HOST: issuer-simulator
-      ISSUER_PORT: "8584"
+      ISSUER_HOSTS: "issuer-simulator-1:8584,issuer-simulator-2:8584"
       DASHBOARD_URL: http://dashboard:8080
     # give in-flight authorizations time to finish (see
     # services/common/util.serve_until_signal) before a stop/down escalates
     # to SIGKILL -- scripts/graceful_shutdown.sh relies on this
     stop_grace_period: 35s
 
-  issuer-simulator:
+  gateway-2:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    depends_on:
+      seed-generator:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    volumes:
+      - seed-data:/data:ro
+    environment:
+      SEED_DIR: /data
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/payments
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8583"
+      ISSUER_HOSTS: "issuer-simulator-1:8584,issuer-simulator-2:8584"
+      DASHBOARD_URL: http://dashboard:8080
+    stop_grace_period: 35s
+
+  issuer-simulator-1:
+    build:
+      context: .
+      dockerfile: services/issuer_simulator/Dockerfile
+    depends_on:
+      seed-generator:
+        condition: service_completed_successfully
+    volumes:
+      - seed-data:/data:ro
+    environment:
+      SEED_DIR: /data
+      ISSUER_HOST: 0.0.0.0
+      ISSUER_PORT: "8584"
+      DASHBOARD_URL: http://dashboard:8080
+    stop_grace_period: 35s
+
+  issuer-simulator-2:
     build:
       context: .
       dockerfile: services/issuer_simulator/Dockerfile
@@ -77,16 +131,18 @@ services:
     depends_on:
       seed-generator:
         condition: service_completed_successfully
-      gateway:
+      gateway-1:
+        condition: service_started
+      gateway-2:
         condition: service_started
     volumes:
       - seed-data:/data:ro
     environment:
       SEED_DIR: /data
-      GATEWAY_HOST: gateway
-      GATEWAY_PORT: "8583"
+      GATEWAY_HOSTS: "gateway-1:8583,gateway-2:8583"
       DASHBOARD_URL: http://dashboard:8080
-      TARGET_TPS: "3"
+      TARGET_TPS: "10"
+      MAX_OUTSTANDING: "300"
     stop_grace_period: 35s
 
   dashboard:

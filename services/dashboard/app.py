@@ -56,6 +56,13 @@ CONTROL = {"merchant_paused": False, "issuer_paused": False, "rate_multiplier": 
 
 _clients: set[WebSocket] = set()
 
+# Below this many transactions in the percentage window, the split is
+# statistically meaningless (one or two transactions can swing it from
+# 0% to 100%) -- report it as no data (null) rather than plotting that
+# noise, so the frontend renders a gap instead of a wildly oscillating
+# (or misleadingly frozen) stripe on the stacked charts during a lull.
+MIN_PCT_SAMPLE = 5
+
 
 class RateBody(BaseModel):
     multiplier: float
@@ -78,17 +85,22 @@ def current_stats():
     window_total = window_approved + window_declined
     # deliberately not the same as approve_pct/decline_pct below, which are
     # lifetime cumulative and would look like a flat, barely-moving line
-    window_approve_pct = (window_approved / window_total * 100) if window_total else 0.0
-    window_decline_pct = (window_declined / window_total * 100) if window_total else 0.0
+    if window_total >= MIN_PCT_SAMPLE:
+        window_approve_pct = window_approved / window_total * 100
+        window_decline_pct = window_declined / window_total * 100
+    else:
+        window_approve_pct = window_decline_pct = None
 
     auth_type_window_counts = {
         label: len([t for t in dq if now - t <= window]) for label, dq in AUTH_TYPE_TIMESTAMPS.items()
     }
     auth_type_total = sum(auth_type_window_counts.values())
-    auth_type_pct = {
-        label: round((count / auth_type_total * 100) if auth_type_total else 0.0, 1)
-        for label, count in auth_type_window_counts.items()
-    }
+    if auth_type_total >= MIN_PCT_SAMPLE:
+        auth_type_pct = {
+            label: round(count / auth_type_total * 100, 1) for label, count in auth_type_window_counts.items()
+        }
+    else:
+        auth_type_pct = {label: None for label in auth_type_window_counts}
 
     total = COUNTS["approved"] + COUNTS["declined"]
     approve_pct = (COUNTS["approved"] / total * 100) if total else 0.0
@@ -99,8 +111,8 @@ def current_stats():
         "tps": round(tps, 2),
         "tps_approved": round(tps_approved, 2),
         "tps_declined": round(tps_declined, 2),
-        "window_approve_pct": round(window_approve_pct, 1),
-        "window_decline_pct": round(window_decline_pct, 1),
+        "window_approve_pct": round(window_approve_pct, 1) if window_approve_pct is not None else None,
+        "window_decline_pct": round(window_decline_pct, 1) if window_decline_pct is not None else None,
         "auth_type_pct": auth_type_pct,
         "approved": COUNTS["approved"],
         "declined": COUNTS["declined"],
