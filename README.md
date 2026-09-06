@@ -189,6 +189,22 @@ catches and logs the duplicate-table error from whichever replica loses
 the race to create the `authorizations` table, since the outcome
 (schema exists) is what both wanted anyway.
 
+**Measured throughput**: pushing the rate slider to 10x (~100 offered
+TPS) and measuring the sustained result directly against Postgres (row
+count delta over a timed window, cross-checked against the dashboard's
+own TPS stat) gave a ceiling of roughly **70-80 TPS**, up from ~42 TPS
+on a single gateway/single issuer-simulator before any of the fixes in
+this section existed. At that ceiling the gateway's own concurrency
+semaphore is nowhere near saturated (Little's Law: throughput × time-
+in-system ≈ 70 × 3.1s ≈ 217, comfortably under the 300 total capacity of
+2 replicas × `CONCURRENCY_LIMIT` 150) — the actual constraint on the
+machine this was measured on was host CPU (4 cores, load average
+climbing past 8 under the test), not any of the pools, limits, or
+semaphores described here. Those exist to make the system degrade
+honestly under real resource pressure (rising latency, a growing but
+bounded backlog, zero errors) rather than to raise the ceiling itself;
+on different hardware the ceiling will be different.
+
 ### Merchant-side backpressure: `MAX_OUTSTANDING`
 
 The merchant-simulator originates transactions as independent
@@ -415,7 +431,9 @@ ISO 8583 host-to-host links use.
     state every ~2s) and are independent of each other.
 - **Rate slider (0.1x–10x)** — multiplies every merchant's base send
   rate, which itself is proportional to how many template transactions
-  that merchant has in the seed pool.
+  that merchant has in the seed pool. The combined base rate across all
+  merchants is `TARGET_TPS` (default 10), so the slider's range spans
+  roughly 1–100 offered TPS.
 
 Chart.js is vendored locally (`services/dashboard/static/vendor/`), not
 loaded from a CDN — the browser only ever talks to the dashboard
@@ -464,6 +482,10 @@ config change, not a rewrite:
 3. Rebuild the gateway image. The table is created on startup via
    `metadata.create_all`, so no separate migration step is needed for a
    fresh database.
+4. Set the new database's own connection-limit setting (MySQL's
+   `max_connections`, Postgres's shown above) the same way: roughly
+   `N × CONCURRENCY_LIMIT` for N gateway replicas — see "Horizontal
+   scaling" above for why.
 
 ## Suggested test uses
 
