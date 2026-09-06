@@ -144,6 +144,42 @@ in the same instant coalesce into one dashboard request instead of each
 firing their own. Re-running the same 10x load test afterwards showed
 0 TIME_WAIT on the gateway's dashboard connection throughout.
 
+### Fire-and-forget dashboard events, and a self-inflicted CPU bottleneck
+
+The gateway's `fire_event()` posts each stage of a transaction
+(`received`, `forwarded_to_issuer`, `completed`) to the dashboard as a
+background `asyncio.create_task` rather than being `await`ed inline in
+`_handle_merchant()`. `report_event()` itself already never raises — a
+dashboard outage or slow response must never block the authorization
+path — but it used to be awaited anyway, so every transaction held its
+`CONCURRENCY_LIMIT` slot for the full round trip to the dashboard on top
+of its own processing. Firing it as a background task instead shortens
+each transaction's real time-in-system, raising throughput for the same
+concurrency limit. As with the merchant-simulator's own background sends
+(`_BACKGROUND_TASKS`), a strong reference (`_event_tasks`) keeps each
+task alive until it finishes, since asyncio only holds a *weak* one
+otherwise and could silently garbage-collect it mid-flight.
+
+The first version of this fix made things *worse*, and it's worth
+recording why: making every event fire-and-forget let far more of them
+pile up concurrently against the gateway's single `httpx.AsyncClient`
+than before, when a transaction's own 3 event posts were naturally
+serialized by being awaited one after another. `py-spy dump` on a
+gateway process pegged at ~90% CPU while producing almost no throughput
+showed the entire main thread stuck in httpcore's
+`_assign_requests_to_connections` — the connection-pool bookkeeping that
+matches pending requests to available connections doesn't scale well
+with a large number of simultaneously in-flight requests on one client,
+and became a CPU-bound bottleneck in its own right, completely
+independent of `CONCURRENCY_LIMIT` or anything DB/issuer-related. The
+fix was `_event_semaphore`, capping actual concurrent httpx dispatch to
+30 — the caller still never waits on it (only the background task does),
+so the non-blocking benefit is kept, but httpx's own bookkeeping stays
+cheap. This is the reason `fire_event()`'s implementation is two small
+functions (`fire_event` creates the task and returns immediately;
+`_dispatch_event` is what actually waits on the semaphore) rather than
+one.
+
 ### Horizontal scaling: multiple gateway and issuer-simulator replicas
 
 `podman-compose.yml` runs the gateway and issuer-simulator each as 2
@@ -192,18 +228,25 @@ the race to create the `authorizations` table, since the outcome
 **Measured throughput**: pushing the rate slider to 10x (~100 offered
 TPS) and measuring the sustained result directly against Postgres (row
 count delta over a timed window, cross-checked against the dashboard's
-own TPS stat) gave a ceiling of roughly **70-80 TPS**, up from ~42 TPS
-on a single gateway/single issuer-simulator before any of the fixes in
-this section existed. At that ceiling the gateway's own concurrency
+own TPS stat) gave a ceiling of roughly **70-80 TPS** after connection
+pooling and horizontal scaling alone, up from ~42 TPS on a single
+gateway/single issuer-simulator before any of the fixes in this section
+existed. Fixing the fire-and-forget event-dispatch bottleneck above
+pushed that further, to individual readings **peaking at 94 TPS** —
+essentially the rate slider's own ceiling — with a noisier sustained
+average in the 60-75 TPS range on the 4-core machine this was measured
+on; the oscillation itself (rather than a clean plateau) is a sign of
+the system now genuinely probing against real CPU capacity rather than
+an artificial bottleneck. At these levels the gateway's own concurrency
 semaphore is nowhere near saturated (Little's Law: throughput × time-
-in-system ≈ 70 × 3.1s ≈ 217, comfortably under the 300 total capacity of
-2 replicas × `CONCURRENCY_LIMIT` 150) — the actual constraint on the
-machine this was measured on was host CPU (4 cores, load average
-climbing past 8 under the test), not any of the pools, limits, or
-semaphores described here. Those exist to make the system degrade
-honestly under real resource pressure (rising latency, a growing but
-bounded backlog, zero errors) rather than to raise the ceiling itself;
-on different hardware the ceiling will be different.
+in-system stays comfortably under the 300 total capacity of 2 replicas ×
+`CONCURRENCY_LIMIT` 150) — the constraint is host CPU itself, not any of
+the pools, limits, or semaphores described here. Those exist to make the
+system degrade honestly under real resource pressure (rising latency, a
+growing but bounded backlog, zero errors) rather than to raise the
+ceiling itself; on different hardware — or with other processes (a
+browser, in one case) competing for the same cores — the ceiling will be
+different.
 
 ### Merchant-side backpressure: `MAX_OUTSTANDING`
 

@@ -12,9 +12,10 @@ to the issuer-simulator over a connection borrowed from a
 services.common.pool.ConnectionPool (reused across many transactions
 rather than opened fresh each time), waits for the (mutated) response,
 persists it, and returns it to the merchant. Every stage is reported to
-the dashboard as a best-effort event POST so the web UI can show the
-live flow; a dashboard outage never blocks the authorization path
-itself.
+the dashboard as a best-effort event POST (fire_event() below, fired in
+the background rather than awaited) so the web UI can show the live
+flow; a dashboard outage -- or just a slow one -- never blocks or slows
+down the authorization path itself.
 
 The merchant-simulator pools and reuses its connections to us the same
 way (see services/merchant_simulator/app.py), so handle_merchant() below
@@ -122,6 +123,47 @@ async def report_event(stage: str, **fields):
         await _http.post(f"{DASHBOARD_URL}/events", json=payload)
     except Exception as exc:  # dashboard is observability-only, never fatal
         log.debug("event post failed (%s): %s", stage, exc)
+
+
+_event_tasks: set = set()
+# Caps how many report_event() calls are actually dispatching an HTTP
+# request to httpx at once. Found the hard way (py-spy'd a gateway
+# process pegged at ~90% CPU producing almost no throughput): making
+# every event fire-and-forget let far more of them pile up concurrently
+# against the *same* httpx client than before, when each transaction's
+# own 3 event posts were naturally serialized by being awaited inline.
+# httpx/httpcore's internal connection<->request matching
+# (_assign_requests_to_connections) doesn't scale well with a large
+# number of simultaneously in-flight requests on one client -- it became
+# a CPU-bound bottleneck in its own right, not an I/O one, completely
+# independent of CONCURRENCY_LIMIT or anything DB/issuer-related. This
+# semaphore keeps the non-blocking benefit (the caller never awaits it)
+# while keeping httpx's own bookkeeping cheap.
+_event_semaphore = asyncio.Semaphore(30)
+
+
+async def _dispatch_event(stage: str, fields: dict):
+    async with _event_semaphore:
+        await report_event(stage, **fields)
+
+
+def fire_event(stage: str, **fields):
+    """Posts a dashboard event without the caller waiting for it.
+    report_event() above already never raises -- a dashboard outage must
+    never block the authorization path -- but it used to be *awaited*
+    inline anyway, so every transaction held its CONCURRENCY_LIMIT slot
+    for the full round trip to the dashboard on top of its actual
+    auth-processing work. Firing it as a background task instead shortens
+    each transaction's real time in the system, which raises throughput
+    for the same concurrency limit. asyncio only holds a *weak* reference
+    to a task that isn't referenced anywhere else -- one could be silently
+    garbage-collected mid-flight otherwise -- so _event_tasks keeps a
+    strong one alive until it finishes (see services/merchant_simulator/
+    app.py's _BACKGROUND_TASKS for the same fix applied to its sends,
+    found the hard way there first)."""
+    task = asyncio.create_task(_dispatch_event(stage, fields))
+    _event_tasks.add(task)
+    task.add_done_callback(_event_tasks.discard)
 
 
 def now():
@@ -235,7 +277,7 @@ async def handle_merchant(reader: asyncio.StreamReader, writer: asyncio.StreamWr
                     fallback_pos_entry_mode = iso8583.POS_ENTRY_MODE_NAMES.get(
                         req.get("pos_entry_mode"), req.get("pos_entry_mode")
                     )
-                    await report_event(
+                    fire_event(
                         "completed", transaction_id=txn_id, merchant_id=req.get("merchant_id"),
                         terminal_id=req.get("terminal_id"), card_network=extra.get("card_network"),
                         amount=str(req.get("amount_minor_units", "0")), currency=extra.get("currency_code_alpha"),
@@ -292,7 +334,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
         "status": "PENDING",
         "received_at": received_at,
     })
-    await report_event(
+    fire_event(
         "received", transaction_id=txn_id, merchant_id=req["merchant_id"],
         terminal_id=req["terminal_id"], card_network=card_network,
         amount=str(req["amount_minor_units"]), currency=extra.get("currency_code_alpha"),
@@ -306,7 +348,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
 
     forwarded_at = now()
     await db.update_response(txn_id, {"forwarded_at": forwarded_at})
-    await report_event("forwarded_to_issuer", transaction_id=txn_id)
+    fire_event("forwarded_to_issuer", transaction_id=txn_id)
 
     try:
         _resp_mti, resp = await forward_to_issuer(mti, out_values)
@@ -333,7 +375,7 @@ async def _handle_merchant(mti: str, req: dict, writer: asyncio.StreamWriter, tx
         "completed_at": completed_at,
         "duration_ms": duration_ms,
     })
-    await report_event(
+    fire_event(
         "completed", transaction_id=txn_id, merchant_id=req["merchant_id"],
         terminal_id=req["terminal_id"], card_network=card_network,
         amount=str(req["amount_minor_units"]), currency=extra.get("currency_code_alpha"),
